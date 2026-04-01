@@ -107,6 +107,11 @@ def generate_analyst_prompt(
 ## 最需要关注的区域（长期被忽视）
 {areas_text}
 
+## 自动化测试结果
+{project_state.get('quality_results', '（无测试结果）')}
+如果有截图路径，你可以用 view 工具查看截图来识别视觉问题（渲染异常、UI 错位、纹理缺失等）。
+根据发现的视觉问题生成相应的修复任务。
+
 ## 你的工作
 
 1. 从「{perspective.get('label', '?')}」视角审视整个项目
