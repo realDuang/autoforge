@@ -153,10 +153,61 @@ def get_git_diff_stat(workspace: str) -> tuple[int, list[str]]:
 
 def gather_project_state(workspace: str) -> dict:
     """Gather comprehensive project state."""
-    return {
+    state = {
         "total_files": count_files(workspace),
         "total_lines": count_lines(workspace),
         "file_tree": get_file_tree(workspace),
         "git_log": get_git_log(workspace),
         "workspace": workspace,
     }
+
+    # Collect quality test results (screenshots, reports) if available
+    quality_report = gather_quality_results(workspace)
+    if quality_report:
+        state["quality_results"] = quality_report
+
+    return state
+
+
+def gather_quality_results(workspace: str) -> str:
+    """Read quality test results (report.json + screenshot paths) if available."""
+    import json
+
+    results_dir = os.path.join(workspace, "_test_results")
+    report_path = os.path.join(results_dir, "report.json")
+
+    if not os.path.isfile(report_path):
+        return ""
+
+    try:
+        with open(report_path, "r", encoding="utf-8", errors="replace") as f:
+            report = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return ""
+
+    lines = []
+    test_run = report.get("testRun", {})
+    lines.append(f"Maps tested: {test_run.get('mapCount', 0)}")
+    lines.append(f"Total errors: {test_run.get('totalErrors', 0)}")
+    lines.append(f"Total warnings: {test_run.get('totalWarnings', 0)}")
+    lines.append(f"All passed: {test_run.get('allPassed', False)}")
+
+    # Include issues and screenshot paths
+    for rpt in report.get("reports", []):
+        scenario = rpt.get("scenario", "?")
+        issues = rpt.get("issues", [])
+        screenshots = rpt.get("screenshots", [])
+        error_issues = [i for i in issues if i.get("severity") == "Error"]
+        warning_issues = [i for i in issues if i.get("severity") == "Warning"]
+
+        if error_issues or warning_issues:
+            lines.append(f"\n{scenario}: {len(error_issues)} errors, {len(warning_issues)} warnings")
+            for issue in error_issues[:3]:
+                lines.append(f"  ERROR: [{issue.get('category')}] {issue.get('message')}")
+            for issue in warning_issues[:3]:
+                lines.append(f"  WARNING: [{issue.get('category')}] {issue.get('message')}")
+
+        if screenshots:
+            lines.append(f"  Screenshots: {', '.join(screenshots)}")
+
+    return "\n".join(lines)
