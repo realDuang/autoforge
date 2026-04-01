@@ -32,7 +32,8 @@
     "tasks_per_phase": 5,
     "cooldown_seconds": 10,
     "build_command": "",
-    "build_timeout": 120
+    "build_timeout": 120,
+    "quality_commands": []
   },
   "parallel": {
     "max_builders": 1,

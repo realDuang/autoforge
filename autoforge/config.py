@@ -37,6 +37,7 @@ class TasksConfig:
     cooldown_seconds: int = 10
     build_command: str = ""  # Shell command to verify build (empty = skip). Examples: "make", "npm run build", "cargo check"
     build_timeout: int = 120
+    quality_commands: list[dict] = field(default_factory=list)  # Additional quality checks: [{"name": str, "command": str, "timeout": int}]
 
 
 @dataclass
