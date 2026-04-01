@@ -22,6 +22,30 @@ def run_cmd(cmd: str, cwd: str, timeout: int = 30) -> str:
         return ""
 
 
+def run_cmd_full(cmd: str, cwd: str, timeout: int = 30) -> tuple[int, str]:
+    """Run a shell command and return (exit_code, combined stdout+stderr)."""
+    try:
+        result = subprocess.run(
+            cmd,
+            shell=True,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            encoding="utf-8",
+            errors="replace",
+        )
+        output = (result.stdout + "\n" + result.stderr).strip()
+        return result.returncode, output
+    except subprocess.TimeoutExpired as e:
+        output = ""
+        if e.stdout:
+            output += e.stdout if isinstance(e.stdout, str) else e.stdout.decode("utf-8", errors="replace")
+        return -1, output.strip() or "Command timed out"
+    except Exception as e:
+        return -1, str(e)
+
+
 def count_files(workspace: str) -> int:
     count = 0
     for root, dirs, files in os.walk(workspace):

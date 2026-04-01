@@ -1,6 +1,6 @@
 """Quality gate checks for AutoForge."""
 import logging
-from .state import run_cmd
+from .state import run_cmd, run_cmd_full
 
 logger = logging.getLogger("autoforge")
 
@@ -57,17 +57,31 @@ def check_custom_commands(workspace: str, commands: list[dict]) -> dict:
             continue
 
         logger.info(f"Running quality command: {name}")
-        output = run_cmd(command, workspace, timeout=timeout)
+        exit_code, output = run_cmd_full(command, workspace, timeout=timeout)
 
-        if output is None:
-            warnings.append(f"[{name}] Command timed out or not available")
+        if exit_code == -1:
+            warnings.append(f"[{name}] Command timed out or failed to execute")
             continue
 
+        if exit_code != 0:
+            # Non-zero exit = command reported failure
+            error_lines = [l.strip() for l in output.split("\n")
+                          if l.strip() and (": error " in l or "error:" in l.lower()
+                                           or "FAILED" in l or "BUILD FAILED" in l)]
+            if error_lines:
+                for line in error_lines[:5]:
+                    issues.append(f"[{name}] {line[:200]}")
+            else:
+                issues.append(f"[{name}] Command exited with code {exit_code}")
+            logger.warning(f"Quality command '{name}' failed (exit={exit_code})")
+            continue
+
+        # Exit code 0 but still check output for error patterns
         for line in output.split("\n"):
             line = line.strip()
             if not line:
                 continue
-            if ": error " in line or "error:" in line.lower():
+            if ": error " in line or "SCRIPT ERROR" in line:
                 issues.append(f"[{name}] {line[:200]}")
             elif "FAILED" in line:
                 if not any(f"[{name}]" in i for i in issues):
