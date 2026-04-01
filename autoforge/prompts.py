@@ -260,5 +260,6 @@ def _area_keywords(area: str) -> list[str]:
         "audio": ["audio", "sound", "music", "bgm", "sfx"],
         "core": ["core", "engine", "system", "base", "util"],
         "job": ["job", "class", "warrior", "mage", "archer", "thief"],
+        "validation": ["validation", "validate", "verify", "test", "quality", "check"],
     }
     return mapping.get(area, [area])

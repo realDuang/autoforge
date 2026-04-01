@@ -322,7 +322,8 @@ class Orchestrator:
             return False
 
         # Quality gate
-        qg = run_quality_gate(self.config.workspace_dir, self.config.tasks.build_command, self.config.tasks.build_timeout)
+        qg = run_quality_gate(self.config.workspace_dir, self.config.tasks.build_command, self.config.tasks.build_timeout,
+                              quality_commands=self.config.tasks.quality_commands)
         if not qg["passed"]:
             logger.warning(f"Quality gate failed: {qg['issues']}")
             self.db.mark_task_failed(task_id, reason=f"Quality gate: {qg['issues']}")
@@ -398,7 +399,8 @@ class Orchestrator:
                 os.remove(result_path)
 
             # Quality gate (run against the worktree, not main workspace)
-            qg = run_quality_gate(working_dir, self.config.tasks.build_command, self.config.tasks.build_timeout)
+            qg = run_quality_gate(working_dir, self.config.tasks.build_command, self.config.tasks.build_timeout,
+                                 quality_commands=self.config.tasks.quality_commands)
 
             success = result["success"] and qg["passed"]
 
