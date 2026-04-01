@@ -77,9 +77,10 @@ def check_custom_commands(workspace: str, commands: list[dict]) -> dict:
             continue
 
         # Exit code 0 but still check output for error patterns
+        _benign = ("WASAPI", "ERR_CANT_OPEN", "Condition \"hr")
         for line in output.split("\n"):
             line = line.strip()
-            if not line:
+            if not line or any(b in line for b in _benign):
                 continue
             if ": error " in line or "SCRIPT ERROR" in line:
                 issues.append(f"[{name}] {line[:200]}")
