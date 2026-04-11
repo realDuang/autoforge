@@ -6,12 +6,24 @@ from typing import Any
 
 
 @dataclass
-class CopilotConfig:
-    path: str = "copilot"
-    model: str = "claude-opus-4.6-1m"
+class AgentConfig:
+    backend: str = "claude_code"
+    path: str = "claude"
+    model: str = ""  # Empty = use backend's default model
     effort: str = "high"
     timeout_minutes: int = 30
     extra_args: list[str] = field(default_factory=list)
+
+    def to_backend_config(self) -> dict:
+        """Convert to a dict suitable for AgentBackend.__init__."""
+        return {
+            "path": self.path,
+            "model": self.model,
+            "effort": self.effort,
+            "timeout_minutes": self.timeout_minutes,
+            "extra_args": self.extra_args,
+        }
+
 
 
 @dataclass
@@ -49,8 +61,16 @@ class ParallelConfig:
 
 
 @dataclass
+class ReviewerConfig:
+    enabled: bool = False
+    model: str = ""  # Empty = use same model as builder
+    max_review_cycles: int = 2
+    backend: str = ""  # Empty = use same backend as builder
+
+
+@dataclass
 class AutoForgeConfig:
-    copilot: CopilotConfig
+    agent: AgentConfig
     phases: list[str]
     perspectives: list[Perspective]
     convergence: ConvergenceConfig
@@ -60,6 +80,13 @@ class AutoForgeConfig:
     data_dir: str
     seed_file: str
     base_dir: str  # resolved absolute path of autoforge root
+    language: str = "en"
+    templates_dir: str = ""
+    hooks: dict = field(default_factory=dict)  # {"post_build": [...], "pre_merge": [...]}
+    reviewer: ReviewerConfig = field(default_factory=ReviewerConfig)
+    permissions: dict = field(default_factory=dict)  # {"analyst": "readonly", "builder": "full", "reviewer": "readonly"}
+    knowledge: dict = field(default_factory=dict)  # {"area_keywords": {"combat": ["fight", "attack"]}, "auto_discover": true}
+    phase_config: dict = field(default_factory=dict)  # {"BUILD": {"model": "opus-4"}, "TEST": {"model": "sonnet-4"}}
 
     @classmethod
     def _resolve_path(cls, path: str, base: str) -> str:
@@ -76,7 +103,9 @@ class AutoForgeConfig:
         with open(config_path, "r", encoding="utf-8") as f:
             raw = json.load(f)
 
-        copilot = CopilotConfig(**raw.get("copilot", {}))
+        agent_raw = raw.get("agent", {})
+        agent = AgentConfig(**{k: v for k, v in agent_raw.items() if k in AgentConfig.__dataclass_fields__})
+
         perspectives = [Perspective(**p) for p in raw.get("perspectives", [])]
         convergence = ConvergenceConfig(**raw.get("convergence", {}))
         tasks = TasksConfig(**raw.get("tasks", {}))
@@ -99,7 +128,7 @@ class AutoForgeConfig:
             data_dir = os.path.join(workspace_dir, ".autoforge")
 
         return cls(
-            copilot=copilot,
+            agent=agent,
             phases=raw.get("phases", ["BUILD", "TEST", "FIX", "EVOLVE"]),
             perspectives=perspectives,
             convergence=convergence,
@@ -109,6 +138,13 @@ class AutoForgeConfig:
             data_dir=data_dir,
             seed_file=seed_file,
             base_dir=base_dir,
+            language=raw.get("language", "en"),
+            templates_dir=cls._resolve_path(raw.get("templates_dir", ""), base_dir),
+            hooks=raw.get("hooks", {}),
+            reviewer=ReviewerConfig(**{k: v for k, v in raw.get("reviewer", {}).items() if k in ReviewerConfig.__dataclass_fields__}),
+            permissions=raw.get("permissions", {}),
+            knowledge=raw.get("knowledge", {}),
+            phase_config=raw.get("phase_config", {}),
         )
 
     @property

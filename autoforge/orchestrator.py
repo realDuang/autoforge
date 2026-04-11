@@ -10,17 +10,21 @@ import time
 from datetime import datetime
 from typing import Optional
 
+from .agents import get_backend, SessionResult
 from .config import AutoForgeConfig
 from .convergence import detect_convergence
 from .db import Database
+from .hooks import build_hooks_from_config
+from .metrics import record_session_metric, print_stats
 from .parallel import resolve_worktree_dir, run_worker_pool, cleanup_worktrees
+from .permissions import get_profile_for_role
 from .prompts import (
     find_related_knowledge_files,
     generate_analyst_prompt,
     generate_builder_prompt,
 )
-from .quality_gate import run_quality_gate
-from .runner import check_copilot_available, run_copilot_session, request_shutdown, is_shutdown_requested
+from .reviewer import run_review, ReviewResult
+from .runner import request_shutdown, is_shutdown_requested
 from .state import gather_project_state, get_git_diff_stat, run_cmd
 
 
@@ -31,6 +35,13 @@ class Orchestrator:
     def __init__(self, config: AutoForgeConfig):
         self.config = config
         self.db = Database(config.db_path)
+        self.agent = get_backend(config.agent.backend, config.agent.to_backend_config())
+        self.hook_runner = build_hooks_from_config(
+            config.hooks,
+            build_command=config.tasks.build_command,
+            build_timeout=config.tasks.build_timeout,
+            quality_commands=config.tasks.quality_commands,
+        )
         self._ensure_dirs()
         self._setup_logging()
         self._load_seed()
@@ -119,7 +130,7 @@ class Orchestrator:
         idx = self._get_perspective_index()
         perspectives = self.config.perspectives
         if not perspectives:
-            return {"id": "P1", "name": "general", "label": "通用", "desc": "通用分析"}
+            return {"id": "P1", "name": "general", "label": "General", "desc": "General analysis"}
         p = perspectives[idx % len(perspectives)]
         return {"id": p.id, "name": p.name, "label": p.label, "desc": p.desc}
 
@@ -139,6 +150,32 @@ class Orchestrator:
         self._set_current_phase(new_phase)
         self.db.set_state("last_completed_phase", current)
         logger.info(f"Phase advanced: {current} → {new_phase}")
+
+    def _get_permission_profile(self, role: str):
+        """Get permission profile for a role, only if permissions are explicitly configured."""
+        if not self.config.permissions:
+            return None  # No config → backend default (full access, backward compat)
+        return get_profile_for_role(role, self.config.permissions.get(role))
+
+    def _get_phase_agent(self, phase: str) -> 'AgentBackend':
+        """Get the agent backend for a given phase, applying per-phase overrides."""
+        pc = self.config.phase_config.get(phase, {})
+        if not pc:
+            return self.agent
+
+        override_model = pc.get("model")
+        override_backend = pc.get("backend")
+
+        if override_backend and override_backend != self.config.agent.backend:
+            cfg = {**self.config.agent.to_backend_config()}
+            if override_model:
+                cfg["model"] = override_model
+            return get_backend(override_backend, cfg)
+        elif override_model:
+            cfg = {**self.config.agent.to_backend_config(), "model": override_model}
+            return get_backend(self.config.agent.backend, cfg)
+
+        return self.agent
 
     def _get_loop_count(self) -> int:
         return int(self.db.get_state("loop_count", "0"))
@@ -218,26 +255,38 @@ class Orchestrator:
             loop_count=loop_count,
             data_dir=self.config.data_dir,
             phases=self.config.phases,
+            language=self.config.language,
+            templates_dir=self.config.templates_dir,
         )
 
         prompt_path = os.path.join(
             self.config.prompts_dir, f"analyst_{loop_count:04d}.md"
         )
 
-        result = run_copilot_session(
+        result = self.agent.run_session(
             prompt=prompt,
             working_dir=self.config.workspace_dir,
-            copilot_path=self.config.copilot.path,
-            model=self.config.copilot.model,
-            effort=self.config.copilot.effort,
-            timeout_minutes=self.config.copilot.timeout_minutes,
-            extra_args=self.config.copilot.extra_args,
+            timeout_minutes=self.config.agent.timeout_minutes,
             prompt_save_path=prompt_path,
+            permission_profile=self._get_permission_profile("analyst"),
         )
 
-        if not result["success"]:
-            logger.error(f"Analyst session failed: {result.get('stderr', '')[:200]}")
+        if not result.success:
+            logger.error(f"Analyst session failed: {result.stderr[:200]}")
+            record_session_metric(
+                self.db, task_id="", session_type="analyst",
+                agent_backend=self.config.agent.backend, model=self.config.agent.model,
+                duration_seconds=result.duration_seconds, exit_code=result.exit_code,
+                phase=self._get_current_phase(), perspective=perspective["id"],
+            )
             return
+
+        record_session_metric(
+            self.db, task_id="", session_type="analyst",
+            agent_backend=self.config.agent.backend, model=self.config.agent.model,
+            duration_seconds=result.duration_seconds, exit_code=result.exit_code,
+            phase=self._get_current_phase(), perspective=perspective["id"],
+        )
 
         # Parse generated tasks
         new_tasks = self._parse_analyst_tasks()
@@ -281,7 +330,8 @@ class Orchestrator:
         self.db.mark_task_in_progress(task_id)
 
         related_kb = find_related_knowledge_files(
-            self.config.knowledge_dir, task.get("area", "general")
+            self.config.knowledge_dir, task.get("area", "general"),
+            area_keywords=self.config.knowledge.get("area_keywords"),
         )
 
         prompt = generate_builder_prompt(
@@ -292,44 +342,68 @@ class Orchestrator:
             related_knowledge_files=related_kb,
             data_dir=self.config.data_dir,
             build_command=self.config.tasks.build_command,
+            language=self.config.language,
+            templates_dir=self.config.templates_dir,
         )
 
         prompt_path = os.path.join(
             self.config.prompts_dir, f"builder_{loop_count:04d}.md"
         )
 
-        result = run_copilot_session(
+        phase_agent = self._get_phase_agent(self._get_current_phase())
+        result = phase_agent.run_session(
             prompt=prompt,
             working_dir=self.config.workspace_dir,
-            copilot_path=self.config.copilot.path,
-            model=self.config.copilot.model,
-            effort=self.config.copilot.effort,
-            timeout_minutes=self.config.copilot.timeout_minutes,
-            extra_args=self.config.copilot.extra_args,
+            timeout_minutes=self.config.agent.timeout_minutes,
             prompt_save_path=prompt_path,
+            permission_profile=self._get_permission_profile("builder"),
         )
 
         # Read task result
         task_result = self._read_task_result()
 
-        if not result["success"]:
-            logger.warning(f"Builder session failed (exit={result.get('exit_code')})")
-            self.db.mark_task_failed(task_id, reason=result.get("stderr", "")[:500])
+        # Record session metric
+        record_session_metric(
+            self.db, task_id=task_id, session_type="builder",
+            agent_backend=phase_agent.name, model=self.config.agent.model,
+            duration_seconds=result.duration_seconds, exit_code=result.exit_code,
+            phase=self._get_current_phase(), perspective=self._get_current_perspective()["id"],
+        )
+
+        if not result.success:
+            logger.warning(f"Builder session failed (exit={result.exit_code})")
+            self.db.mark_task_failed(task_id, reason=result.stderr[:500])
 
             if self.db.should_skip_task(task_id, self.config.tasks.max_retries):
                 self.db.mark_task_skipped(task_id, reason="Max retries exceeded")
                 logger.warning(f"Task skipped (max retries): {task['title']}")
             return False
 
-        # Quality gate
-        qg = run_quality_gate(self.config.workspace_dir, self.config.tasks.build_command, self.config.tasks.build_timeout,
-                              quality_commands=self.config.tasks.quality_commands)
-        if not qg["passed"]:
-            logger.warning(f"Quality gate failed: {qg['issues']}")
-            self.db.mark_task_failed(task_id, reason=f"Quality gate: {qg['issues']}")
+        # Quality gate via hooks
+        qg = self.hook_runner.run_hooks("post_build", self.config.workspace_dir)
+        if not qg.passed:
+            logger.warning(f"Quality gate failed: {qg.issues}")
+            self.db.mark_task_failed(task_id, reason=f"Quality gate: {qg.issues}")
             if self.db.should_skip_task(task_id, self.config.tasks.max_retries):
                 self.db.mark_task_skipped(task_id, reason="Quality gate failures")
             return False
+
+        # Optional reviewer
+        if self.config.reviewer.enabled:
+            review = self._run_review(task, task_result)
+            if review.verdict == "REJECT":
+                logger.warning(f"Reviewer REJECTED: {review.summary}")
+                self.db.mark_task_failed(task_id, reason=f"Reviewer rejected: {review.summary}")
+                if self.db.should_skip_task(task_id, self.config.tasks.max_retries):
+                    self.db.mark_task_skipped(task_id, reason="Reviewer rejection")
+                return False
+            elif review.verdict == "REQUEST_CHANGES":
+                logger.info(f"Reviewer requested changes: {review.issues}")
+                # Mark failed so it gets retried with feedback
+                self.db.mark_task_failed(
+                    task_id, reason=f"Reviewer feedback: {'; '.join(review.issues)}"
+                )
+                return False
 
         # Success!
         summary = task_result[:500] if task_result else "Completed"
@@ -343,10 +417,41 @@ class Orchestrator:
         self._git_commit(commit_msg)
 
         logger.info(f"Task completed: {task['title']}")
-        if qg["warnings"]:
-            logger.info(f"  ({len(qg['warnings'])} warnings)")
+        if qg.warnings:
+            logger.info(f"  ({len(qg.warnings)} warnings)")
 
         return True
+
+    def _run_review(self, task: dict, builder_summary: str) -> ReviewResult:
+        """Run the reviewer agent on the builder's changes."""
+        logger.info(f"=== REVIEWER SESSION: {task['title']} ===")
+
+        # Use a separate agent backend for the reviewer if configured
+        rc = self.config.reviewer
+        if rc.backend and rc.backend != self.config.agent.backend:
+            reviewer_agent = get_backend(rc.backend, {
+                **self.config.agent.to_backend_config(),
+                **({"model": rc.model} if rc.model else {}),
+            })
+        elif rc.model:
+            reviewer_agent = get_backend(self.config.agent.backend, {
+                **self.config.agent.to_backend_config(),
+                "model": rc.model,
+            })
+        else:
+            reviewer_agent = self.agent
+
+        return run_review(
+            agent=reviewer_agent,
+            task=task,
+            builder_summary=builder_summary,
+            workspace_dir=self.config.workspace_dir,
+            data_dir=self.config.data_dir,
+            reviewer_config=rc,
+            language=self.config.language,
+            templates_dir=self.config.templates_dir,
+            timeout_minutes=min(15, self.config.agent.timeout_minutes),
+        )
 
     def _build_single_builder_fn(self, project_state: dict, loop_count: int):
         """Return a builder function for use with run_parallel_builders.
@@ -361,7 +466,8 @@ class Orchestrator:
             self.db.mark_task_in_progress(task_id)
 
             related_kb = find_related_knowledge_files(
-                self.config.knowledge_dir, task.get("area", "general")
+                self.config.knowledge_dir, task.get("area", "general"),
+                area_keywords=self.config.knowledge.get("area_keywords"),
             )
 
             prompt = generate_builder_prompt(
@@ -373,21 +479,21 @@ class Orchestrator:
                 data_dir=self.config.data_dir,
                 task_result_filename=task_result_filename,
                 build_command=self.config.tasks.build_command,
+                language=self.config.language,
+                templates_dir=self.config.templates_dir,
             )
 
             prompt_path = os.path.join(
                 self.config.prompts_dir, f"builder_{loop_count:04d}_{task_id}.md"
             )
 
-            result = run_copilot_session(
+            phase_agent = self._get_phase_agent(self._get_current_phase())
+            result = phase_agent.run_session(
                 prompt=prompt,
                 working_dir=working_dir,
-                copilot_path=self.config.copilot.path,
-                model=self.config.copilot.model,
-                effort=self.config.copilot.effort,
-                timeout_minutes=self.config.copilot.timeout_minutes,
-                extra_args=self.config.copilot.extra_args,
+                timeout_minutes=self.config.agent.timeout_minutes,
                 prompt_save_path=prompt_path,
+                permission_profile=self._get_permission_profile("builder"),
             )
 
             # Read task result from the shared data_dir
@@ -398,16 +504,15 @@ class Orchestrator:
                     task_result = f.read()
                 os.remove(result_path)
 
-            # Quality gate (run against the worktree, not main workspace)
-            qg = run_quality_gate(working_dir, self.config.tasks.build_command, self.config.tasks.build_timeout,
-                                 quality_commands=self.config.tasks.quality_commands)
+            # Quality gate via hooks (run against the worktree, not main workspace)
+            qg = self.hook_runner.run_hooks("post_build", working_dir)
 
-            success = result["success"] and qg["passed"]
+            success = result.success and qg.passed
 
             return {
                 "success": success,
                 "result_summary": task_result[:500] if task_result else (
-                    f"Quality gate failed: {qg['issues']}" if not qg["passed"] else "Completed"
+                    f"Quality gate failed: {qg.issues}" if not qg.passed else "Completed"
                 ),
             }
 
@@ -489,7 +594,7 @@ class Orchestrator:
         )
 
         if analyst_thread is not None:
-            analyst_thread.join(timeout=self.config.copilot.timeout_minutes * 60)
+            analyst_thread.join(timeout=self.config.agent.timeout_minutes * 60)
             logger.info("Analyst prefetch completed")
 
         logger.info(f"Worker pool finished: {success_count} tasks succeeded")
@@ -550,22 +655,23 @@ class Orchestrator:
 
         return False
 
-    def run(self):
-        """Main orchestration loop — runs forever."""
+    def run(self, max_loops: int | None = None):
+        """Main orchestration loop. Runs forever unless max_loops is set."""
         logger.info("=" * 60)
         logger.info("  AutoForge — Infinite Autonomous Development Framework")
         logger.info("=" * 60)
         logger.info(f"Workspace: {self.config.workspace_dir}")
         logger.info(f"Data dir:  {self.config.data_dir}")
-        logger.info(f"Model: {self.config.copilot.model}")
+        logger.info(f"Model: {self.config.agent.model}")
+        logger.info(f"Agent: {self.config.agent.backend}")
         logger.info(f"Phases: {self.config.phases}")
         logger.info(f"Perspectives: {len(self.config.perspectives)}")
         logger.info(f"Parallel: max_builders={self.config.parallel.max_builders}")
 
-        # Check copilot availability
-        if not check_copilot_available(self.config.copilot.path):
-            logger.error(f"Copilot CLI not found: {self.config.copilot.path}")
-            logger.error("Install it or update copilot.path in config")
+        # Check agent availability
+        if not self.agent.check_available():
+            logger.error(f"Agent backend not available: {self.config.agent.backend} (path: {self.config.agent.path})")
+            logger.error("Install it or update agent.path in config")
             sys.exit(1)
 
         # Initialize workspace git
@@ -573,8 +679,9 @@ class Orchestrator:
 
         # Main loop
         tasks_completed_this_phase = 0
+        loop_count = self._get_loop_count()
 
-        while True:
+        while max_loops is None or loop_count < max_loops:
             loop_count = self._increment_loop_count()
             phase = self._get_current_phase()
             perspective = self._get_current_perspective()
@@ -662,6 +769,17 @@ def main():
         action="store_true",
         help="Initialize a new AutoForge project",
     )
+    parser.add_argument(
+        "--stats",
+        action="store_true",
+        help="Print session metrics dashboard",
+    )
+    parser.add_argument(
+        "--max-loops",
+        type=int,
+        default=None,
+        help="Maximum number of loops to run (default: unlimited)",
+    )
 
     args = parser.parse_args()
 
@@ -693,10 +811,16 @@ def main():
         orchestrator.db.close()
         return
 
+    if args.stats:
+        db = Database(config.db_path)
+        print_stats(db)
+        db.close()
+        return
+
     orchestrator = Orchestrator(config)
 
     def _signal_handler(sig, frame):
-        logger.info("\nShutdown requested (Ctrl+C) — terminating copilot sessions...")
+        logger.info("\nShutdown requested (Ctrl+C) — terminating agent sessions...")
         request_shutdown()
         # Raise KeyboardInterrupt to break out of main loop / sleep
         raise KeyboardInterrupt
@@ -705,7 +829,7 @@ def main():
     signal.signal(signal.SIGTERM, _signal_handler)
 
     try:
-        orchestrator.run()
+        orchestrator.run(max_loops=args.max_loops)
     except KeyboardInterrupt:
         logger.info("AutoForge stopped by user")
     except Exception as e:

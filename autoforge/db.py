@@ -68,6 +68,22 @@ CREATE TABLE IF NOT EXISTS run_state (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+
+CREATE TABLE IF NOT EXISTS session_metrics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT DEFAULT (datetime('now','localtime')),
+    task_id TEXT,
+    session_type TEXT,
+    agent_backend TEXT,
+    model TEXT,
+    duration_seconds REAL,
+    exit_code INTEGER,
+    quality_passed INTEGER,
+    review_verdict TEXT,
+    merge_result TEXT,
+    phase TEXT,
+    perspective TEXT
+);
 """
 
 
@@ -384,3 +400,49 @@ class Database:
             "not_implemented": total - implemented,
             "by_level": by_level,
         }
+
+    # --- Session Metrics ---
+
+    def record_session_metric(
+        self,
+        task_id: str = "",
+        session_type: str = "",
+        agent_backend: str = "",
+        model: str = "",
+        duration_seconds: float = 0,
+        exit_code: int = 0,
+        quality_passed: Optional[bool] = None,
+        review_verdict: Optional[str] = None,
+        merge_result: Optional[str] = None,
+        phase: str = "",
+        perspective: str = "",
+    ):
+        with self._lock:
+            self.conn.execute(
+                """INSERT INTO session_metrics
+                   (task_id, session_type, agent_backend, model,
+                    duration_seconds, exit_code, quality_passed,
+                    review_verdict, merge_result, phase, perspective)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    task_id, session_type, agent_backend, model,
+                    duration_seconds, exit_code,
+                    1 if quality_passed else (0 if quality_passed is not None else None),
+                    review_verdict, merge_result, phase, perspective,
+                ),
+            )
+            self.conn.commit()
+
+    def get_session_stats(self) -> list[dict]:
+        rows = self.conn.execute(
+            """SELECT
+                 session_type,
+                 COUNT(*) as total,
+                 SUM(CASE WHEN exit_code = 0 THEN 1 ELSE 0 END) as successes,
+                 ROUND(AVG(duration_seconds), 1) as avg_duration,
+                 ROUND(100.0 * SUM(CASE WHEN exit_code = 0 THEN 1 ELSE 0 END) / COUNT(*), 1) as success_rate
+               FROM session_metrics
+               GROUP BY session_type
+               ORDER BY session_type"""
+        ).fetchall()
+        return [dict(r) for r in rows]

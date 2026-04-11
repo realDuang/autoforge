@@ -1,7 +1,8 @@
 {
-  "copilot": {
-    "path": "copilot",
-    "model": "claude-opus-4.6-1m",
+  "agent": {
+    "backend": "claude_code",
+    "path": "claude",
+    "model": "claude-sonnet-4-20250514",
     "effort": "high",
     "timeout_minutes": 30,
     "extra_args": []
@@ -11,15 +12,15 @@
   "seed_file": "./seed.md",
   "phases": ["BUILD", "TEST", "FIX", "EVOLVE"],
   "perspectives": [
-    {"id": "P1", "name": "feature_gap",       "label": "功能缺口",   "desc": "对比知识库与当前实现，找出未实现的功能，生成新功能开发任务"},
-    {"id": "P2", "name": "bug_hunt",          "label": "Bug猎人",    "desc": "审查现有代码逻辑，找出潜在Bug、边界错误、未处理的异常，生成修复任务"},
-    {"id": "P3", "name": "test_coverage",     "label": "测试覆盖",   "desc": "找出已实现但缺少测试的功能，生成测试编写任务"},
-    {"id": "P4", "name": "performance",       "label": "性能审计",   "desc": "识别性能瓶颈、内存泄漏、不必要的计算，生成优化任务"},
-    {"id": "P5", "name": "code_quality",      "label": "代码质量",   "desc": "找出代码异味、重复逻辑、过度耦合，生成重构任务"},
-    {"id": "P6", "name": "content",           "label": "内容完整性", "desc": "检查项目内容的实现完整性，生成内容创建任务"},
-    {"id": "P7", "name": "ux",                "label": "交互体验",   "desc": "评估用户体验流程、缺失的视觉反馈、不够直觉的操作，生成体验优化任务"},
-    {"id": "P8", "name": "integration",       "label": "系统集成",   "desc": "检查各子系统之间的交互和数据流是否正确，生成集成修复任务"},
-    {"id": "P9", "name": "resource_pipeline", "label": "资源管线",   "desc": "检查资源提取、解析、导入流程的完整性和正确性，生成资源管线任务"}
+    {"id": "P1", "name": "feature_gap",       "label": "Feature Gap",       "desc": "Compare specs vs. implementation, identify unimplemented features, generate new feature tasks"},
+    {"id": "P2", "name": "bug_hunt",          "label": "Bug Hunt",          "desc": "Review existing code logic, find potential bugs, boundary errors, unhandled exceptions, generate fix tasks"},
+    {"id": "P3", "name": "test_coverage",     "label": "Test Coverage",     "desc": "Find implemented features lacking tests, generate test writing tasks"},
+    {"id": "P4", "name": "performance",       "label": "Performance Audit", "desc": "Identify performance bottlenecks, memory leaks, unnecessary computation, generate optimization tasks"},
+    {"id": "P5", "name": "code_quality",      "label": "Code Quality",      "desc": "Find code smells, duplicated logic, excessive coupling, generate refactoring tasks"},
+    {"id": "P6", "name": "content",           "label": "Content Integrity", "desc": "Check content implementation completeness, generate content creation tasks"},
+    {"id": "P7", "name": "ux",                "label": "User Experience",   "desc": "Evaluate user experience flow, missing visual feedback, unintuitive operations, generate UX improvement tasks"},
+    {"id": "P8", "name": "integration",       "label": "System Integration","desc": "Check subsystem interactions and data flow correctness, generate integration fix tasks"},
+    {"id": "P9", "name": "resource_pipeline", "label": "Resource Pipeline", "desc": "Check resource extraction, parsing, and import pipeline completeness, generate pipeline tasks"}
   ],
   "convergence": {
     "check_window": 5,

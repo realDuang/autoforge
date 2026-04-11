@@ -1,6 +1,13 @@
-"""Prompt generation for AutoForge analyst and builder sessions."""
+"""Prompt generation for AutoForge analyst and builder sessions.
+
+Loads prompt templates from the templates/ directory and fills them with
+project-specific variables. Supports language switching (en/zh).
+"""
 import os
 from typing import Optional
+
+# Package directory for built-in templates
+_TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
 
 
 def _read_file(path: str, max_chars: int = 8000) -> str:
@@ -12,6 +19,31 @@ def _read_file(path: str, max_chars: int = 8000) -> str:
         return content
     except OSError:
         return "(file not found)"
+
+
+def _load_template(name: str, language: str = "en", templates_dir: str = "") -> str:
+    """Load a prompt template by name and language.
+
+    Search order:
+    1. Custom templates_dir (if provided)
+    2. Built-in templates/{language}/
+    3. Built-in templates/en/ (fallback)
+    """
+    candidates = []
+    if templates_dir:
+        candidates.append(os.path.join(templates_dir, language, f"{name}.md"))
+        if language != "en":
+            candidates.append(os.path.join(templates_dir, "en", f"{name}.md"))
+    candidates.append(os.path.join(_TEMPLATES_DIR, language, f"{name}.md"))
+    if language != "en":
+        candidates.append(os.path.join(_TEMPLATES_DIR, "en", f"{name}.md"))
+
+    for path in candidates:
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read()
+
+    raise FileNotFoundError(f"Template not found: {name}.md (language={language})")
 
 
 def _format_completed_tasks(tasks: list[dict]) -> str:
@@ -57,8 +89,10 @@ def generate_analyst_prompt(
     loop_count: int,
     data_dir: str = ".autoforge",
     phases: list[str] | None = None,
+    language: str = "en",
+    templates_dir: str = "",
 ) -> str:
-    """Generate the analyst session prompt."""
+    """Generate the analyst session prompt using a template."""
 
     kb_file_list = _gather_knowledge_summary_text(knowledge_dir)
     completed_text = _format_completed_tasks(recent_completed)
@@ -69,79 +103,39 @@ def generate_analyst_prompt(
 
     if phases is None:
         phases = ["BUILD", "TEST", "FIX"]
-    phase_labels = {"BUILD": "新功能", "TEST": "编写测试", "FIX": "修复问题"}
-    phase_text = "、".join(f"{p}（{phase_labels.get(p, p)}）" for p in phases if p != "EVOLVE")
 
-    return f"""你是一个项目分析师。你的工作是分析当前项目状态并生成新的开发任务。
-这是自动化编排器的第 {loop_count} 轮迭代。
+    if language == "zh":
+        phase_labels = {"BUILD": "新功能", "TEST": "编写测试", "FIX": "修复问题"}
+        phase_text = "、".join(f"{p}（{phase_labels.get(p, p)}）" for p in phases if p != "EVOLVE")
+    else:
+        phase_labels = {"BUILD": "new features", "TEST": "write tests", "FIX": "fix issues"}
+        phase_text = ", ".join(f"{p} ({phase_labels.get(p, p)})" for p in phases if p != "EVOLVE")
 
-## 项目描述
-{seed_content}
+    template = _load_template("analyst", language, templates_dir)
 
-## 当前项目状态
-- 文件总数: {project_state.get('total_files', 0)}
-- 代码总行数: {project_state.get('total_lines', 0)}
-- 已完成任务总数: {len(recent_completed)} (最近)
+    variables = {
+        "loop_count": loop_count,
+        "seed_content": seed_content,
+        "total_files": project_state.get('total_files', 0),
+        "total_lines": project_state.get('total_lines', 0),
+        "completed_count": len(recent_completed),
+        "file_tree": project_state.get('file_tree', '(empty)'),
+        "git_log": project_state.get('git_log', '(no commits yet)'),
+        "kb_total": kb_stats.get('total', 0),
+        "kb_implemented": kb_stats.get('implemented', 0),
+        "kb_not_implemented": kb_stats.get('not_implemented', 0),
+        "kb_level_dist": kb_level_dist,
+        "kb_file_list": kb_file_list,
+        "completed_text": completed_text,
+        "perspective_label": perspective.get('label', '?'),
+        "perspective_desc": perspective.get('desc', ''),
+        "areas_text": areas_text,
+        "quality_results": project_state.get('quality_results', '(no test results)'),
+        "data_dir": data_dir_label,
+        "phase_text": phase_text,
+    }
 
-## 项目文件结构
-{project_state.get('file_tree', '(empty)')}
-
-## 最近 Git 提交
-{project_state.get('git_log', '(no commits yet)')}
-
-## 知识库状态
-- 总条目: {kb_stats.get('total', 0)}
-- 已实现: {kb_stats.get('implemented', 0)}
-- 未实现: {kb_stats.get('not_implemented', 0)}
-- 层级分布: {kb_level_dist}
-
-知识库文件:
-{kb_file_list}
-
-## 最近完成的任务（避免生成重复任务）
-{completed_text}
-
-## 当前分析视角: {perspective.get('label', '?')}
-{perspective.get('desc', '')}
-
-## 最需要关注的区域（长期被忽视）
-{areas_text}
-
-## 自动化测试结果
-{project_state.get('quality_results', '（无测试结果）')}
-如果有截图路径，你可以用 view 工具查看截图来识别视觉问题（渲染异常、UI 错位、纹理缺失等）。
-根据发现的视觉问题生成相应的修复任务。
-
-## 你的工作
-
-1. 从「{perspective.get('label', '?')}」视角审视整个项目
-2. 对比项目描述和知识库与当前实现，找出差距和改进点
-3. 生成 5-10 个**全新的**开发任务
-4. 将任务列表写入 `{data_dir_label}/next_tasks.json`，格式：
-   ```json
-   [
-     {{
-       "title": "任务标题（具体明确）",
-       "description": "详细描述，包括具体要做什么、怎么做、验收标准",
-       "area": "所属区域（如 character, combat, map, ui, skill, monster, item, quest, npc, audio, core, job, equip, resource, effect）",
-       "priority": 5,
-       "phase": "BUILD"
-     }}
-   ]
-   ```
-5. 如果发现知识库中缺少的特性细节，将补充内容写入 `{data_dir_label}/knowledge/` 下对应层级目录的 .md 文件中
-6. 如果知识库还不存在或太薄，优先创建和充实它
-
-## 规则
-- **循序渐进**: 严格遵循项目描述中的实现阶段和优先级标注，不要跳到标记为「暂不实现」的系统
-- **保持可运行**: 每个任务完成后项目必须仍然可以运行，不能引入编译错误或崩溃
-- 每个任务必须**具体可执行**，一个 AI 会话内可完成（约30分钟工作量）
-- 不要生成与「最近完成的任务」重复或高度相似的任务
-- 优先关注「最需要关注的区域」
-- priority 范围 1-10，1 最高优先级
-- phase 取值: {phase_text}
-- 任务描述要包含足够上下文，让执行者无需额外信息即可开始工作
-"""
+    return template.format_map(variables)
 
 
 def generate_builder_prompt(
@@ -153,8 +147,10 @@ def generate_builder_prompt(
     data_dir: str = ".autoforge",
     task_result_filename: str = "task_result.md",
     build_command: str = "",
+    language: str = "en",
+    templates_dir: str = "",
 ) -> str:
-    """Generate the builder session prompt."""
+    """Generate the builder session prompt using a template."""
 
     # Read relevant knowledge entries
     kb_context_parts = []
@@ -170,60 +166,36 @@ def generate_builder_prompt(
     if len(seed_content) > 1500:
         seed_summary += "\n..."
 
-    task_area = task.get("area", "general")
     data_dir_label = data_dir.replace("\\", "/")
 
-    prompt_text = f"""你是一名软件开发者，正在参与以下项目的开发。
+    template = _load_template("builder", language, templates_dir)
 
-## 项目概述
-{seed_summary}
+    variables = {
+        "seed_summary": seed_summary,
+        "task_title": task.get('title', '?'),
+        "task_description": task.get('description', '?'),
+        "task_area": task.get("area", "general"),
+        "task_priority": task.get('priority', 5),
+        "total_files": project_state.get('total_files', 0),
+        "total_lines": project_state.get('total_lines', 0),
+        "file_tree": project_state.get('file_tree', '(empty)'),
+        "kb_context": kb_context,
+        "git_log": project_state.get('git_log', '(no commits yet)'),
+        "data_dir": data_dir_label,
+        "task_result_filename": task_result_filename,
+    }
 
-## 你的当前任务
-**标题**: {task.get('title', '?')}
-**描述**: {task.get('description', '?')}
-**区域**: {task_area}
-**优先级**: {task.get('priority', 5)}
-
-## 项目当前状态
-- 文件总数: {project_state.get('total_files', 0)}
-- 代码总行数: {project_state.get('total_lines', 0)}
-
-## 项目文件结构
-{project_state.get('file_tree', '(empty)')}
-
-## 相关知识库条目
-{kb_context}
-
-## 最近 Git 提交
-{project_state.get('git_log', '(no commits yet)')}
-
-## 规则
-1. **只做上述指定的任务**，不要修改与任务无关的文件
-2. 当前工作目录就是项目根目录
-3. 遵循项目现有的代码风格和目录结构
-4. **完成后项目必须可运行**: 确保没有编译错误
-5. 将工作总结写入 `{data_dir_label}/{task_result_filename}`，包括：
-   - 做了什么
-   - 创建/修改了哪些文件
-   - 是否遇到问题
-   - 验证结果
-6. 如果遇到无法解决的阻塞问题，在 {task_result_filename} 中说明原因
-7. 代码要有合理的注释，但不要过度注释
-"""
-    if build_command:
-        prompt_text += f"""8. **⚠ 编译检查（必须）**：完成代码修改后，必须运行 `{build_command}` 确认 0 个编译错误。如果有编译错误，必须修复后再结束任务。
-"""
-
-    return prompt_text
+    return template.format_map(variables)
 
 
-def find_related_knowledge_files(knowledge_dir: str, area: str) -> list[str]:
+def find_related_knowledge_files(knowledge_dir: str, area: str, area_keywords: dict | None = None) -> list[str]:
     """Find knowledge base files related to a given area."""
     if not os.path.isdir(knowledge_dir):
         return []
 
     related = []
     area_lower = area.lower()
+    keywords = _get_area_keywords(area_lower, area_keywords)
 
     for root, dirs, files in os.walk(knowledge_dir):
         dirs.sort()
@@ -234,8 +206,7 @@ def find_related_knowledge_files(knowledge_dir: str, area: str) -> list[str]:
             fname_lower = fname.lower()
             # Match by area keyword in filename
             if area_lower in fname_lower or any(
-                kw in fname_lower
-                for kw in _area_keywords(area_lower)
+                kw in fname_lower for kw in keywords
             ):
                 related.append(rel)
 
@@ -250,21 +221,8 @@ def find_related_knowledge_files(knowledge_dir: str, area: str) -> list[str]:
     return related[:10]
 
 
-def _area_keywords(area: str) -> list[str]:
-    """Map area names to related search keywords."""
-    mapping = {
-        "character": ["char", "player", "stat", "level", "exp"],
-        "combat": ["fight", "attack", "damage", "battle", "hit"],
-        "map": ["map", "tile", "platform", "portal", "world"],
-        "ui": ["ui", "hud", "interface", "menu", "window", "gui"],
-        "skill": ["skill", "ability", "spell", "buff"],
-        "monster": ["monster", "mob", "enemy", "boss", "spawn"],
-        "item": ["item", "equip", "inventory", "potion", "scroll"],
-        "quest": ["quest", "mission", "objective", "reward"],
-        "npc": ["npc", "dialog", "shop", "vendor"],
-        "audio": ["audio", "sound", "music", "bgm", "sfx"],
-        "core": ["core", "engine", "system", "base", "util"],
-        "job": ["job", "class", "warrior", "mage", "archer", "thief"],
-        "validation": ["validation", "validate", "verify", "test", "quality", "check"],
-    }
-    return mapping.get(area, [area])
+def _get_area_keywords(area: str, custom_keywords: dict | None = None) -> list[str]:
+    """Get search keywords for an area. Uses custom mapping if provided, otherwise empty fallback."""
+    if custom_keywords:
+        return custom_keywords.get(area, [area])
+    return [area]

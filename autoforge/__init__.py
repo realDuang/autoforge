@@ -1,2 +1,2 @@
-"""AutoForge — 无限自主进化开发框架"""
-__version__ = "0.1.0"
+"""AutoForge — AI Agent Harness Engineering Framework"""
+__version__ = "0.2.0"

@@ -1,179 +1,318 @@
-# AutoForge — 无限自主进化开发框架
+# AutoForge
 
-一个通用的、任务无关的无限自主开发框架。通过 Copilot CLI 的 autopilot 模式，让 AI 在无人干预下持续推进任何软件项目，且永不收敛。
+An AI agent harness engineering framework that orchestrates coding agents in a continuous, autonomous development loop. Point it at any software project with a `seed.md` description, and AutoForge drives an infinite Analyst → Builder pipeline — generating tasks, executing them, enforcing quality gates, and evolving the codebase without human intervention.
 
-## 核心特性
+## Features
 
-- **无限运行**: while-true 编排循环 + 崩溃自恢复
-- **永不收敛**: 多视角轮换 + 任务指纹去重 + 收敛检测 + 区域注意力平衡
-- **自我进化**: AI 自主扩充知识库 → 生成新任务 → 执行任务 → 循环
-- **任务无关**: 只需提供一个 `seed.md` 种子文件即可驱动任何项目
-- **目录隔离**: `workspace_dir` 和 `data_dir` 完全可配置，不污染其他位置
-- **始终可运行**: 每个任务完成后项目必须仍然可以编译和运行
+- **Multi-agent backend** — ships with `claude_code` (Claude Code CLI) and `ghcp` (GitHub Copilot CLI); add your own via the `AgentBackend` interface
+- **Infinite autonomous loop** — while-true orchestration with crash recovery, graceful shutdown (Ctrl+C), and `--max-loops N` for bounded runs
+- **Anti-convergence** — 9-perspective rotation, task fingerprint dedup, area attention balancing, and automatic convergence detection with forced escape
+- **Deterministic quality gates** — lifecycle hooks (`post_build`, `pre_merge`, `post_merge`) run shell commands guaranteed, independent of agent prompts
+- **Writer-Reviewer pattern** — optional adversarial review stage with a clean-context reviewer agent (can use a different model/backend)
+- **Permission sandboxing** — graduated permission levels per role, translated to backend-native flags
+- **Parallel builders** — git-worktree-based parallel execution with merge locking and area-level concurrency control
+- **Per-phase configuration** — different models, backends, or permissions for each phase (BUILD/TEST/FIX/EVOLVE)
+- **Session metrics** — per-session performance tracking with `--stats` dashboard
+- **i18n prompt templates** — built-in English and Chinese templates, user-customizable via `templates_dir`
 
-## 架构
-
-```
-双会话循环:
-  ┌──────────┐      ┌──────────┐
-  │ ANALYST  │─────▶│ BUILDER  │
-  │ 分析+生成 │      │ 执行任务  │
-  └──────────┘      └──────────┘
-
-四相位旋转:
-  BUILD → TEST → FIX → EVOLVE → BUILD → ...
-
-九视角轮换:
-  功能缺口 → Bug猎人 → 测试覆盖 → 性能审计 →
-  代码质量 → 内容完整性 → 交互体验 → 系统集成 → 资源管线 → ...
-```
-
-## 目录结构
+## How It Works
 
 ```
-autoforge/                         # 框架代码
-├── autoforge/                     # Python 包
-│   ├── orchestrator.py            # 主编排循环
-│   ├── config.py                  # 配置加载
-│   ├── db.py                      # SQLite 状态数据库
-│   ├── state.py                   # 项目状态收集
-│   ├── convergence.py             # 收敛检测
-│   ├── prompts.py                 # Prompt 生成
-│   ├── runner.py                  # Copilot CLI 调用
-│   └── quality_gate.py            # 质量门禁
-├── autoforge_config.template.json # 配置模板（复制为 autoforge_config.json 使用）
-├── start.ps1                      # PowerShell 启动脚本
-└── start.bat                      # Windows 批处理启动
-
-# 以下文件由用户创建，不纳入版本管理：
-# autoforge_config.json            # 实际配置（从模板复制）
-# seed.md                          # 种子文件（项目描述）
-
-workspace_dir (用户配置):          # 实际项目代码
-├── project.godot
-├── Scripts/
-├── Scenes/
-└── ...
-
-data_dir (用户配置):               # AutoForge 运行时数据
-├── state.db                       # SQLite 状态数据库
-├── knowledge/                     # 自增长知识库
-│   ├── L2_features/
-│   ├── L3_details/
-│   └── L4_edge_cases/
-├── prompts/                       # Prompt 存档（可调试）
-├── logs/                          # 运行日志
-├── next_tasks.json                # 分析师输出（临时）
-└── task_result.md                 # 执行者输出（临时）
+┌────────────────────────────────────────────────────────────────┐
+│                    ORCHESTRATOR LOOP                           │
+│                                                                │
+│  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌─────────┐  │
+│  │ ANALYST  │───▶│ BUILDER  │───▶│ REVIEWER │───▶│  HOOKS  │  │
+│  │ Generate │    │ Execute  │    │ (opt.)   │    │ Quality │  │
+│  │ Tasks    │    │ Task     │    │ Approve/ │    │ Gates   │  │
+│  └──────────┘    └──────────┘    │ Reject   │    └─────────┘  │
+│       ▲                          └──────────┘         │       │
+│       │                                               │       │
+│       └───────────────────────────────────────────────┘       │
+│                                                                │
+│  Phase rotation:  BUILD → TEST → FIX → EVOLVE → BUILD → ...  │
+│  Perspective rotation:  P1 → P2 → ... → P9 → P1 → ...       │
+└────────────────────────────────────────────────────────────────┘
 ```
 
-## 快速开始
+**Loop 1 (EVOLVE):** The Analyst examines the project state, knowledge base, and seed description through a rotating perspective (Feature Gap, Bug Hunt, Test Coverage, Performance, Code Quality, etc.), then generates a batch of prioritized tasks written to `next_tasks.json`.
 
-### 1. 前置要求
+**Loop 2+ (BUILD/TEST/FIX):** The Builder picks the highest-priority task from the least-touched area, executes it via the agent CLI, then runs quality hooks. If the optional Reviewer is enabled, it performs an adversarial review. Passed tasks are committed; failed tasks are retried or skipped.
+
+**Convergence escape:** If git diffs shrink, the same files keep being modified, or code size stagnates, AutoForge rotates the perspective and forces an EVOLVE phase to generate fresh tasks.
+
+## Quick Start
+
+### Prerequisites
 
 - Python 3.10+
-- [Copilot CLI](https://docs.github.com/copilot/how-tos/copilot-cli) (`copilot` 命令可用)
+- One of:
+  - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) — `claude` CLI
+  - [GitHub Copilot CLI](https://docs.github.com/copilot) — `copilot` CLI
 - Git
 
-### 2. 配置
+### Setup
 
-```powershell
-cd D:\workspace\autoforge
+```bash
+# Clone
+git clone https://github.com/realDuang/autoforge.git
+cd autoforge
 
-# 从模板创建配置文件
-Copy-Item autoforge_config.template.json autoforge_config.json
+# Copy and edit config
+cp autoforge_config.template.json autoforge_config.json
 
-# 编辑配置：设定 workspace_dir、data_dir、copilot.model 等
-notepad autoforge_config.json
+# Create your project description
+cat > seed.md << 'EOF'
+# My Project
+A web app that does X, Y, Z.
 
-# 创建种子文件：描述你的项目
-notepad seed.md
+## Tech Stack
+- Node.js, React, PostgreSQL
+
+## Features
+- User auth [NOT YET]
+- Dashboard [IN PROGRESS]
+- API endpoints [IN PROGRESS]
+EOF
+
+# Initialize (creates directories and database)
+python -m autoforge --init
+
+# Run (Ctrl+C to stop gracefully)
+python -m autoforge
 ```
 
-配置文件只需设定框架运行参数，不包含任何项目特定内容：
+### Using GitHub Copilot instead of Claude Code
 
 ```json
 {
-  "copilot": {
-    "model": "claude-opus-4.6-1m"
+  "agent": {
+    "backend": "ghcp",
+    "path": "copilot",
+    "model": "gpt-4.1"
+  }
+}
+```
+
+### Bounded runs
+
+```bash
+# Run exactly 3 loops (1 analyst + 2 builder), then exit
+python -m autoforge --max-loops 3
+
+# View performance dashboard
+python -m autoforge --stats
+```
+
+## Configuration
+
+Minimal config (all other fields have sensible defaults):
+
+```json
+{
+  "agent": {
+    "backend": "claude_code",
+    "model": "claude-sonnet-4-20250514"
   },
-  "workspace_dir": "D:\\workspace\\MyProject",
+  "workspace_dir": "./my-project",
   "seed_file": "./seed.md"
 }
 ```
 
-所有项目特定信息（技术栈、资源路径、功能规格等）都写在 `seed.md` 中。
+### Full Reference
 
-### 3. 初始化
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| **Agent** | | |
+| `agent.backend` | Backend name (`claude_code`, `ghcp`, or custom) | `claude_code` |
+| `agent.path` | CLI executable path | `claude` |
+| `agent.model` | Model identifier (empty = backend default) | `""` |
+| `agent.effort` | Reasoning effort level | `high` |
+| `agent.timeout_minutes` | Max session duration | `30` |
+| `agent.extra_args` | Additional CLI arguments | `[]` |
+| **Project** | | |
+| `workspace_dir` | Target project directory | `./workspace` |
+| `seed_file` | Project description file | `./seed.md` |
+| `data_dir` | Runtime data directory | `{workspace_dir}/.autoforge` |
+| `language` | Prompt template language (`en`/`zh`) | `en` |
+| `templates_dir` | Custom prompt templates path | (built-in) |
+| **Phases & Perspectives** | | |
+| `phases` | Phase rotation order | `["BUILD","TEST","FIX","EVOLVE"]` |
+| `perspectives` | Analysis viewpoints (id, name, label, desc) | 9 built-in |
+| **Tasks** | | |
+| `tasks.tasks_per_phase` | Tasks to complete before phase advance | `5` |
+| `tasks.max_retries` | Max retries before skipping a task | `3` |
+| `tasks.cooldown_seconds` | Pause between loops | `10` |
+| `tasks.build_command` | Legacy build verification command | `""` |
+| `tasks.quality_commands` | Legacy quality check commands | `[]` |
+| **Quality Hooks** | | |
+| `hooks.post_build` | Hooks after builder session | `[]` |
+| `hooks.pre_merge` | Hooks before worktree merge | `[]` |
+| `hooks.post_merge` | Hooks after merge to main | `[]` |
+| **Reviewer** | | |
+| `reviewer.enabled` | Enable adversarial review | `false` |
+| `reviewer.model` | Reviewer model (empty = same as builder) | `""` |
+| `reviewer.backend` | Reviewer backend (empty = same as builder) | `""` |
+| `reviewer.max_review_cycles` | Max review iterations | `2` |
+| **Permissions** | | |
+| `permissions.analyst` | Analyst permission profile | (full by default) |
+| `permissions.builder` | Builder permission profile | (full by default) |
+| `permissions.reviewer` | Reviewer permission profile | (full by default) |
+| **Parallel** | | |
+| `parallel.max_builders` | Concurrent builder workers | `1` |
+| `parallel.worktree_dir` | Worktree base directory | (auto) |
+| `parallel.prefetch_analyst` | Run analyst in background during builds | `false` |
+| **Convergence** | | |
+| `convergence.check_window` | Recent metrics window for detection | `5` |
+| `convergence.min_diff_lines` | Minimum diff lines before triggering | `50` |
+| `convergence.max_file_overlap_ratio` | File overlap threshold | `0.8` |
+| **Per-Phase Overrides** | | |
+| `phase_config.{PHASE}.model` | Model override for a specific phase | (agent default) |
+| `phase_config.{PHASE}.backend` | Backend override for a specific phase | (agent default) |
 
-```powershell
-python -m autoforge --init
+### Hooks
+
+Hooks run shell commands deterministically at pipeline stages. Unlike prompt-based instructions, hooks are guaranteed to execute.
+
+```json
+{
+  "hooks": {
+    "post_build": [
+      {"name": "build", "command": "npm run build", "timeout": 120, "required": true},
+      {"name": "lint", "command": "npm run lint", "required": false}
+    ],
+    "pre_merge": [
+      {"name": "test", "command": "npm test", "required": true}
+    ]
+  }
+}
 ```
 
-### 4. 启动
+- `required: true` — failure aborts the pipeline step (task marked failed)
+- `required: false` — failure logged as warning, pipeline continues
 
-```powershell
-# 带崩溃恢复的无限循环（推荐）
-.\start.ps1 -Loop
+Legacy `tasks.build_command` and `tasks.quality_commands` are auto-converted to `post_build` hooks for backward compatibility.
 
-# 单次运行
-.\start.ps1
+### Permission Sandboxing
 
-# 直接 Python
-python -m autoforge
+When `permissions` is configured, each role gets a restricted profile translated to backend-native flags:
+
+```json
+{
+  "permissions": {
+    "analyst": {"mode": "readonly"},
+    "builder": {"mode": "full"},
+    "reviewer": {"mode": "readonly", "allowed_tools": ["Read", "Glob", "Grep", "Bash"]}
+  }
+}
 ```
 
-### 5. 观察进度
+| Mode | Claude Code | GitHub Copilot |
+|------|-------------|----------------|
+| `full` | `--dangerously-skip-permissions` | `--yolo` |
+| `edit` | `--allowedTools Read,Edit,...` | `--available-tools Read,Edit,...` |
+| `readonly` | `--allowedTools Read,Glob,Grep` | `--available-tools Read,Glob,Grep` |
 
-```powershell
-# 查看运行日志（data_dir 中）
-Get-Content D:\workspace\MyProject\.autoforge\logs\*.log -Tail 50
+When `permissions` is omitted entirely, all roles default to full access (backward compatible).
 
-# 查看 git 提交历史（workspace_dir 中）
-cd D:\workspace\MyProject && git --no-pager log --oneline -20
+### Per-Phase Configuration
+
+Use different models or backends per phase:
+
+```json
+{
+  "phase_config": {
+    "BUILD": {"model": "claude-opus-4-6"},
+    "TEST": {"model": "claude-sonnet-4-6"},
+    "FIX": {"model": "claude-sonnet-4-6"}
+  }
+}
 ```
 
-## 配置项参考
+### Writer-Reviewer Pattern
 
-以下为 `autoforge_config.json` 中可用的配置项：
+Enable adversarial review with an independent reviewer agent:
 
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `workspace_dir` | 项目代码工作目录 | `./workspace` |
-| `data_dir` | 运行时数据目录（DB/知识库/日志） | `{workspace_dir}/.autoforge` |
-| `seed_file` | 种子文件路径 | `./seed.md` |
-| `copilot.path` | Copilot CLI 可执行文件路径 | `copilot` |
-| `copilot.model` | AI 模型 | `claude-sonnet-4-20250514` |
-| `copilot.effort` | 推理强度 | `high` |
-| `copilot.timeout_minutes` | 单次会话超时 | `30` |
-| `tasks.tasks_per_phase` | 每阶段执行任务数 | `5` |
-| `tasks.max_retries` | 任务最大重试次数 | `3` |
-| `tasks.cooldown_seconds` | 轮次间冷却时间 | `10` |
-| `convergence.check_window` | 收敛检测窗口大小 | `5` |
+```json
+{
+  "reviewer": {
+    "enabled": true,
+    "model": "claude-opus-4-6",
+    "max_review_cycles": 2
+  }
+}
+```
 
-## 种子文件 (seed.md) 编写指南
+The reviewer runs in a clean context (no builder conversation history), examines the git diff, and returns one of:
+- **APPROVE** — task passes
+- **REQUEST_CHANGES** — task retried with reviewer feedback
+- **REJECT** — task marked failed
 
-`seed.md` 是驱动整个项目的唯一输入，应包含：
+## Anti-Convergence
 
-1. **技术栈** — 引擎、语言、目标平台
-2. **项目目标** — 要构建什么
-3. **实现阶段** — 标注各功能的优先级和阶段，标记暂不实现的部分
-4. **功能规格** — 越详细越好，分系统/模块描述
-5. **资源信息** — 外部资源路径、数据来源（如有）
-6. **约束规则** — 任何必须遵守的底线要求
+| Layer | Mechanism | Description |
+|-------|-----------|-------------|
+| Task fingerprinting | SHA256 dedup | Identical tasks are never created twice |
+| Perspective rotation | 9 viewpoints | Each analyst run uses a different analysis angle |
+| Area attention | Touch tracking | Prioritizes least-recently-worked areas |
+| Knowledge growth | Self-expanding specs | AI grows the knowledge base, inflating the task source |
+| Convergence detection | Metric monitoring | Detects shrinking diffs, file overlap, code stagnation |
+| Forced escape | Auto-intervention | Detection triggers perspective rotation + EVOLVE phase |
 
-**关键原则**: 种子文件中应标注实现阶段，确保 AI 循序渐进，每阶段产出可运行版本。
+## Custom Agent Backends
 
-## 反收敛机制
+Implement `AgentBackend` and register it:
 
-| 层级 | 机制 | 原理 |
-|------|------|------|
-| 1 | 任务指纹去重 | SHA256 哈希，已完成任务永不重复 |
-| 2 | 视角轮换 | 9种分析视角循环，天然产生不同类型任务 |
-| 3 | 区域注意力平衡 | 追踪每个区域的关注度，优先选择被忽视的区域 |
-| 4 | 知识库自增长 | AI 持续扩充规格文档，任务源不断膨胀 |
-| 5 | 收敛检测 | 监控 diff 大小、文件重叠率、代码量变化 |
-| 6 | 强制跳出 | 检测到收敛 → 切换视角 → 切换区域 → 进入 EVOLVE |
+```python
+from autoforge.agents import AgentBackend, SessionResult, register_backend
+
+class MyBackend(AgentBackend):
+    @property
+    def name(self) -> str:
+        return "my_backend"
+
+    def check_available(self) -> bool:
+        # Check if your CLI/SDK is available
+        ...
+
+    def run_session(self, prompt, working_dir, timeout_minutes=30,
+                    prompt_save_path=None, permission_profile=None) -> SessionResult:
+        # Run the agent and return results
+        ...
+
+register_backend("my_backend", MyBackend)
+```
+
+Then use it in config:
+```json
+{"agent": {"backend": "my_backend"}}
+```
+
+## Project Structure
+
+```
+autoforge/
+├── agents/
+│   ├── __init__.py          # Backend registry
+│   ├── base.py              # AgentBackend ABC + SessionResult
+│   ├── claude_code.py       # Claude Code CLI backend
+│   └── ghcp.py              # GitHub Copilot CLI backend
+├── templates/
+│   ├── en/                  # English prompt templates
+│   └── zh/                  # Chinese prompt templates
+├── orchestrator.py          # Main loop + CLI entry point
+├── config.py                # Configuration dataclasses + loader
+├── db.py                    # SQLite state database
+├── hooks.py                 # Deterministic lifecycle hooks
+├── reviewer.py              # Writer-Reviewer pattern
+├── permissions.py           # Permission profiles
+├── metrics.py               # Session metrics tracking
+├── prompts.py               # Template-based prompt generation
+├── convergence.py           # Convergence detection
+├── parallel.py              # Git worktree parallel execution
+├── state.py                 # Project state gathering
+└── runner.py                # Shutdown coordination
+```
 
 ## License
 
