@@ -11,7 +11,7 @@ Set-Location $scriptDir
 
 Write-Host @"
     ╔═══════════════════════════════════════════════════╗
-    ║       AutoForge — 无限自主进化开发框架             ║
+    ║       AutoForge — 无限自主进化开发框架               ║
     ║       Infinite Autonomous Development             ║
     ╚═══════════════════════════════════════════════════╝
 "@ -ForegroundColor Cyan

@@ -82,14 +82,23 @@ def _remove_worktree(workspace_dir: str, worktree_path: str, branch_name: str):
 def _try_auto_resolve_conflicts(workspace_dir: str, conflicts: list[str]) -> bool:
     """Try to auto-resolve merge conflicts by keeping both sides' additions.
 
-    Works for text files where conflicts are typically both sides adding
-    different lines. For each conflicted file, removes conflict markers
-    and keeps all content.
+    ONLY resolves conflicts in safe file types (data/config/docs).
+    Source code files (.cs, .py, .ts, .js, .java, .cpp, etc.) are NEVER
+    auto-resolved because keeping both sides creates duplicate definitions.
 
     Returns True if all conflicts were resolved.
     """
     import re
+
+    # File extensions where "keep both sides" is safe
+    _SAFE_EXTENSIONS = {".json", ".md", ".txt", ".cfg", ".toml", ".yaml", ".yml", ".xml", ".csv"}
+
     for filepath in conflicts:
+        ext = os.path.splitext(filepath)[1].lower()
+        if ext not in _SAFE_EXTENSIONS:
+            logger.info(f"Auto-resolve skipped for source file: {filepath}")
+            return False  # Refuse to auto-resolve any source code
+
         full_path = os.path.join(workspace_dir, filepath)
         try:
             with open(full_path, "r", encoding="utf-8", errors="replace") as f:
@@ -119,31 +128,45 @@ def _try_auto_resolve_conflicts(workspace_dir: str, conflicts: list[str]) -> boo
     return True
 
 
+# Type for conflict resolution callback: (workspace_dir, conflict_files) -> bool
+ConflictResolverFn = Optional[Callable[[str, list[str]], bool]]
+
+
 def _merge_worktree_to_main(
     workspace_dir: str,
     worktree_path: str,
     branch_name: str,
     commit_msg: str,
+    conflict_resolver: ConflictResolverFn = None,
 ) -> dict:
     """Commit changes in worktree and merge to main. Thread-safe via _merge_lock.
 
     Returns {"success": bool, "detail": str}.
     """
-    # Stage any uncommitted changes (copilot may or may not have committed already)
+    # Stage any uncommitted changes (agent may or may not have committed already)
     _git(["add", "-A"], cwd=worktree_path, check=False)
     status = _git(["status", "--porcelain"], cwd=worktree_path, check=False)
+    
     if status.stdout.strip():
         # There are uncommitted changes — commit them
-        _git(["commit", "-m", commit_msg], cwd=worktree_path, check=False)
+        commit_result = _git(["commit", "-m", commit_msg], cwd=worktree_path, check=False)
+        if commit_result.returncode != 0:
+            logger.warning(f"Commit failed in worktree: {commit_result.stderr.strip()[:200]}")
 
     # Check if the branch has any commits ahead of main
-    # (copilot may have already committed via --yolo mode)
     ahead = _git(
         ["rev-list", "--count", f"main..{branch_name}"],
-        cwd=workspace_dir, check=False,
+        cwd=worktree_path, check=False,
     )
     commits_ahead = int(ahead.stdout.strip()) if ahead.stdout.strip().isdigit() else 0
     if commits_ahead == 0:
+        main_head = _git(["rev-parse", "--short", "main"], cwd=worktree_path, check=False)
+        branch_head = _git(["rev-parse", "--short", "HEAD"], cwd=worktree_path, check=False)
+        logger.warning(
+            f"No commits ahead of main (main={main_head.stdout.strip()}, "
+            f"branch={branch_head.stdout.strip()}, "
+            f"same={main_head.stdout.strip() == branch_head.stdout.strip()})"
+        )
         return {"success": False, "detail": "No code changes produced"}
 
     # Acquire lock — only one merge at a time
@@ -186,10 +209,41 @@ def _merge_worktree_to_main(
             _git(["commit", "--no-edit", "--allow-empty"], cwd=workspace_dir, check=False)
             logger.info(f"Auto-resolved conflicts in: {conflicts}")
             return {"success": True, "detail": f"Merged (auto-resolved {conflicts})"}
-
+        # Try agent-powered conflict resolution for source code files
+        if conflict_resolver is not None:
+            logger.info(f"Attempting agent-powered conflict resolution for {len(conflicts)} files")
+            try:
+                agent_resolved = conflict_resolver(workspace_dir, conflicts)
+                if agent_resolved:
+                    _git(["add", "-A"], cwd=workspace_dir, check=False)
+                    _git(["commit", "--no-edit", "--allow-empty"], cwd=workspace_dir, check=False)
+                    logger.info(f"Agent resolved conflicts in: {conflicts}")
+                    return {"success": True, "detail": f"Merged (agent-resolved {conflicts})"}
+                else:
+                    logger.warning(f"Agent failed to resolve conflicts in: {conflicts}")
+            except Exception as e:
+                logger.warning(f"Agent conflict resolution error: {e}")
+            # Agent failed — abort merge
+            _git(["merge", "--abort"], cwd=workspace_dir, check=False)
+            return {"success": False, "detail": f"Agent could not resolve conflict in {conflicts}"}
         # Unresolvable conflict — abort
         _git(["merge", "--abort"], cwd=workspace_dir, check=False)
         return {"success": False, "detail": f"Merge conflict in {len(conflicts)} files: {conflicts}"}
+
+
+def has_worktree_changes(worktree_path: str) -> bool:
+    """Check if a worktree has any uncommitted or committed changes vs its base."""
+    # Check for uncommitted changes first
+    status = _git(["status", "--porcelain"], cwd=worktree_path, check=False)
+    if status.stdout.strip():
+        return True
+    # Check for commits ahead of main
+    ahead = _git(
+        ["rev-list", "--count", "main..HEAD"],
+        cwd=worktree_path, check=False,
+    )
+    count = int(ahead.stdout.strip()) if ahead.stdout.strip().isdigit() else 0
+    return count > 0
 
 
 BuilderFn = Callable[[dict, str], dict]
@@ -200,6 +254,7 @@ def _run_single_builder(
     builder_fn: BuilderFn,
     workspace_dir: str,
     worktree_base: str,
+    conflict_resolver: ConflictResolverFn = None,
 ) -> dict:
     """Run a single builder in its own worktree, then merge result.
 
@@ -237,7 +292,10 @@ def _run_single_builder(
 
         # Commit and merge
         commit_msg = f"[AutoForge][{task.get('area', '?')}] {task['title']}"
-        merge_result = _merge_worktree_to_main(workspace_dir, wt_path, branch, commit_msg)
+        merge_result = _merge_worktree_to_main(
+            workspace_dir, wt_path, branch, commit_msg,
+            conflict_resolver=conflict_resolver,
+        )
 
         if merge_result["success"]:
             logger.info(f"[{area}] ✓ {title_short} — {merge_result['detail']}")
@@ -281,6 +339,7 @@ def run_worker_pool(
     on_complete_fn: OnCompleteCallbackFn,
     workspace_dir: str,
     worktree_base: str,
+    conflict_resolver: ConflictResolverFn = None,
 ) -> int:
     """Run a pool of workers that continuously pull and execute tasks.
 
@@ -320,7 +379,10 @@ def run_worker_pool(
 
             logger.info(f"[W{worker_id}] ▶ [{task.get('area', '?')}] {task['title'][:60]}")
 
-            result = _run_single_builder(task, builder_fn, workspace_dir, worktree_base)
+            result = _run_single_builder(
+                task, builder_fn, workspace_dir, worktree_base,
+                conflict_resolver=conflict_resolver,
+            )
             on_complete_fn(result)
 
             if result.get("success") and result.get("merged"):
