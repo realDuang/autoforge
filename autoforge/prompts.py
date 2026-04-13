@@ -188,6 +188,132 @@ def generate_builder_prompt(
     return template.format_map(variables)
 
 
+def _parse_acceptance_criteria(task: dict) -> str:
+    """Extract and format acceptance criteria from a task dict."""
+    import json as _json
+    criteria = task.get("acceptance_criteria")
+    if isinstance(criteria, str):
+        try:
+            criteria = _json.loads(criteria)
+        except (ValueError, TypeError):
+            criteria = None
+    if criteria and isinstance(criteria, list):
+        return "\n".join(f"- {c}" for c in criteria)
+    return "(none specified — infer from task description)"
+
+
+def generate_contract_prompt(
+    seed_content: str,
+    task: dict,
+    project_state: dict,
+    knowledge_dir: str,
+    related_knowledge_files: list[str],
+    data_dir: str = ".autoforge",
+    language: str = "en",
+    templates_dir: str = "",
+) -> str:
+    """Generate the sprint contract proposal prompt."""
+    kb_context_parts = []
+    for kf in related_knowledge_files[:5]:
+        full_path = os.path.join(knowledge_dir, kf)
+        if os.path.isfile(full_path):
+            content = _read_file(full_path, max_chars=3000)
+            kb_context_parts.append(f"### {kf}\n{content}")
+    kb_context = "\n\n".join(kb_context_parts) if kb_context_parts else "(no related knowledge entries)"
+
+    seed_summary = seed_content[:1500]
+    if len(seed_content) > 1500:
+        seed_summary += "\n..."
+
+    data_dir_label = data_dir.replace("\\", "/")
+    template = _load_template("contract", language, templates_dir)
+
+    variables = {
+        "seed_summary": seed_summary,
+        "task_title": task.get("title", "?"),
+        "task_description": task.get("description", "?"),
+        "task_area": task.get("area", "general"),
+        "acceptance_criteria": _parse_acceptance_criteria(task),
+        "total_files": project_state.get("total_files", 0),
+        "total_lines": project_state.get("total_lines", 0),
+        "file_tree": project_state.get("file_tree", "(empty)"),
+        "kb_context": kb_context,
+        "data_dir": data_dir_label,
+    }
+
+    return template.format_map(variables)
+
+
+def generate_contract_review_prompt(
+    task: dict,
+    contract: dict,
+    project_state: dict,
+    data_dir: str = ".autoforge",
+    language: str = "en",
+    templates_dir: str = "",
+) -> str:
+    """Generate the contract review prompt for the reviewer agent."""
+    # Format contract criteria
+    vc = contract.get("verification_criteria", [])
+    if vc:
+        criteria_lines = []
+        for c in vc:
+            criteria_lines.append(f"- [{c.get('id', '?')}] ({c.get('type', '?')}) {c.get('description', '?')}")
+        contract_criteria = "\n".join(criteria_lines)
+    else:
+        contract_criteria = "(no criteria specified)"
+
+    files = contract.get("files_to_modify", [])
+    contract_files = ", ".join(files) if files else "(not specified)"
+
+    data_dir_label = data_dir.replace("\\", "/")
+    template = _load_template("contract_review", language, templates_dir)
+
+    variables = {
+        "task_title": task.get("title", "?"),
+        "task_description": task.get("description", "?"),
+        "task_area": task.get("area", "general"),
+        "acceptance_criteria": _parse_acceptance_criteria(task),
+        "contract_approach": contract.get("approach", "(not specified)"),
+        "contract_files": contract_files,
+        "contract_criteria": contract_criteria,
+        "file_tree": project_state.get("file_tree", "(empty)"),
+        "data_dir": data_dir_label,
+    }
+
+    return template.format_map(variables)
+
+
+def build_review_contract_section(contract: dict | None, language: str = "en") -> tuple[str, str]:
+    """Build the contract section and criteria_results hint for the reviewer template.
+
+    Returns (contract_section, criteria_results_hint) strings.
+    """
+    if not contract:
+        return ("", '"(no contract — skip this field)"')
+
+    vc = contract.get("verification_criteria", [])
+    if not vc:
+        return ("", '"(no contract — skip this field)"')
+
+    criteria_lines = []
+    results_example = []
+    for c in vc:
+        cid = c.get("id", "?")
+        criteria_lines.append(f"- **{cid}** ({c.get('type', '?')}): {c.get('description', '?')}")
+        results_example.append(f'{{"id": "{cid}", "pass": true, "note": ""}}')
+
+    if language == "zh":
+        header = "## Sprint 合同验证标准\n\n以下是实现前协商的验证标准。请逐条对照代码变更进行检查：\n"
+    else:
+        header = "## Sprint Contract Verification Criteria\n\nThe following criteria were agreed upon before implementation. Check each one against the code changes:\n"
+
+    section = header + "\n".join(criteria_lines)
+    hint = "[" + ", ".join(results_example) + "]"
+
+    return (section, hint)
+
+
 def find_related_knowledge_files(knowledge_dir: str, area: str, area_keywords: dict | None = None) -> list[str]:
     """Find knowledge base files related to a given area."""
     if not os.path.isdir(knowledge_dir):

@@ -13,6 +13,8 @@ You are an independent code reviewer. Your job is to review changes made by a de
 ## Builder's Summary
 {builder_summary}
 
+{contract_section}
+
 ## Your Job
 
 Review the changes above and provide a structured verdict. Focus on:
@@ -29,6 +31,7 @@ Write your verdict as JSON to `{data_dir}/review_result.json`:
 {{
   "verdict": "APPROVE" | "REQUEST_CHANGES" | "REJECT",
   "issues": ["issue 1", "issue 2"],
+  "criteria_results": {criteria_results_hint},
   "summary": "Brief overall assessment"
 }}
 ```

@@ -51,7 +51,8 @@ Generate corresponding fix tasks based on any visual issues found.
        "description": "Detailed description including what to do, how to do it, and acceptance criteria",
        "area": "Area (e.g. character, combat, map, ui, skill, monster, item, quest, npc, audio, core, job, equip, resource, effect)",
        "priority": 5,
-       "phase": "BUILD"
+       "phase": "BUILD",
+       "acceptance_criteria": ["Criterion 1: specific verifiable condition", "Criterion 2: another checkable condition"]
      }}
    ]
    ```

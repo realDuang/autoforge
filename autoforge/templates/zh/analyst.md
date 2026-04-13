@@ -51,7 +51,8 @@
        "description": "详细描述，包括具体要做什么、怎么做、验收标准",
        "area": "所属区域（如 character, combat, map, ui, skill, monster, item, quest, npc, audio, core, job, equip, resource, effect）",
        "priority": 5,
-       "phase": "BUILD"
+       "phase": "BUILD",
+       "acceptance_criteria": ["标准1：具体可验证的条件", "标准2：另一个可检查的条件"]
      }}
    ]
    ```

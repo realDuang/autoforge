@@ -22,8 +22,9 @@ from .prompts import (
     find_related_knowledge_files,
     generate_analyst_prompt,
     generate_builder_prompt,
+    generate_contract_prompt,
 )
-from .reviewer import run_review, ReviewResult
+from .reviewer import run_review, run_contract_review, ReviewResult, ContractResult
 from .runner import request_shutdown, is_shutdown_requested
 from .state import gather_project_state, get_git_diff_stat, run_cmd
 
@@ -303,6 +304,7 @@ class Orchestrator:
                 phase=phase,
                 area=t.get("area", "general"),
                 priority=t.get("priority", 5),
+                acceptance_criteria=t.get("acceptance_criteria"),
             )
             if task_id:
                 inserted += 1
@@ -329,6 +331,13 @@ class Orchestrator:
 
         self.db.mark_task_in_progress(task_id)
 
+        # Sprint contract phase (if enabled)
+        contract = None
+        if self.config.contract.enabled:
+            contract = self._run_contract_phase(task, project_state, loop_count)
+            if contract is None:
+                logger.warning("Contract phase failed, proceeding without contract")
+
         related_kb = find_related_knowledge_files(
             self.config.knowledge_dir, task.get("area", "general"),
             area_keywords=self.config.knowledge.get("area_keywords"),
@@ -345,6 +354,20 @@ class Orchestrator:
             language=self.config.language,
             templates_dir=self.config.templates_dir,
         )
+
+        # Append contract context to builder prompt
+        if contract:
+            criteria_text = "\n".join(
+                f"- [{c.get('id', '?')}] {c.get('description', '?')}"
+                for c in contract.get("verification_criteria", [])
+            )
+            prompt += (
+                f"\n\n## Approved Sprint Contract\n"
+                f"**Approach**: {contract.get('approach', '?')}\n"
+                f"**Files to modify**: {', '.join(contract.get('files_to_modify', []))}\n"
+                f"**Verification criteria** (your work will be evaluated against these):\n"
+                f"{criteria_text}\n"
+            )
 
         prompt_path = os.path.join(
             self.config.prompts_dir, f"builder_{loop_count:04d}.md"
@@ -390,7 +413,7 @@ class Orchestrator:
 
         # Optional reviewer
         if self.config.reviewer.enabled:
-            review = self._run_review(task, task_result)
+            review = self._run_review(task, task_result, contract=contract)
             if review.verdict == "REJECT":
                 logger.warning(f"Reviewer REJECTED: {review.summary}")
                 self.db.mark_task_failed(task_id, reason=f"Reviewer rejected: {review.summary}")
@@ -422,7 +445,7 @@ class Orchestrator:
 
         return True
 
-    def _run_review(self, task: dict, builder_summary: str) -> ReviewResult:
+    def _run_review(self, task: dict, builder_summary: str, contract: dict | None = None) -> ReviewResult:
         """Run the reviewer agent on the builder's changes."""
         logger.info(f"=== REVIEWER SESSION: {task['title']} ===")
 
@@ -451,7 +474,119 @@ class Orchestrator:
             language=self.config.language,
             templates_dir=self.config.templates_dir,
             timeout_minutes=min(15, self.config.agent.timeout_minutes),
+            contract=contract,
         )
+
+    def _get_reviewer_agent(self):
+        """Get the reviewer agent backend (respects reviewer config overrides)."""
+        rc = self.config.reviewer
+        if rc.backend and rc.backend != self.config.agent.backend:
+            return get_backend(rc.backend, {
+                **self.config.agent.to_backend_config(),
+                **({"model": rc.model} if rc.model else {}),
+            })
+        elif rc.model:
+            return get_backend(self.config.agent.backend, {
+                **self.config.agent.to_backend_config(),
+                "model": rc.model,
+            })
+        return self.agent
+
+    def _run_contract_phase(self, task: dict, project_state: dict, loop_count: int) -> dict | None:
+        """Run the contract proposal + review phase. Returns contract dict or None on failure."""
+        task_id = task["id"]
+        logger.info(f"=== CONTRACT PHASE: {task['title']} ===")
+
+        related_kb = find_related_knowledge_files(
+            self.config.knowledge_dir, task.get("area", "general"),
+            area_keywords=self.config.knowledge.get("area_keywords"),
+        )
+
+        prompt = generate_contract_prompt(
+            seed_content=self.seed_content,
+            task=task,
+            project_state=project_state,
+            knowledge_dir=self.config.knowledge_dir,
+            related_knowledge_files=related_kb,
+            data_dir=self.config.data_dir,
+            language=self.config.language,
+            templates_dir=self.config.templates_dir,
+        )
+
+        prompt_path = os.path.join(
+            self.config.prompts_dir, f"contract_{loop_count:04d}.md"
+        )
+
+        phase_agent = self._get_phase_agent(self._get_current_phase())
+        result = phase_agent.run_session(
+            prompt=prompt,
+            working_dir=self.config.workspace_dir,
+            timeout_minutes=min(10, self.config.agent.timeout_minutes),
+            prompt_save_path=prompt_path,
+            permission_profile=self._get_permission_profile("builder"),
+        )
+
+        if not result.success:
+            logger.warning("Contract proposal session failed")
+            return None
+
+        # Parse sprint_contract.json
+        contract = self._parse_contract()
+        if not contract:
+            logger.warning("Builder did not produce sprint_contract.json")
+            return None
+
+        # Store contract in DB
+        self.db.insert_contract(
+            task_id=task_id,
+            approach=contract.get("approach", ""),
+            files_to_modify=contract.get("files_to_modify", []),
+            verification_criteria=contract.get("verification_criteria", []),
+        )
+
+        # Run contract review
+        reviewer_agent = self._get_reviewer_agent()
+
+        cr = run_contract_review(
+            agent=reviewer_agent,
+            task=task,
+            contract=contract,
+            project_state=project_state,
+            data_dir=self.config.data_dir,
+            language=self.config.language,
+            templates_dir=self.config.templates_dir,
+        )
+
+        self.db.update_contract_review(task_id, cr.verdict, cr.notes)
+
+        if cr.verdict == "REQUEST_CHANGES":
+            logger.info(f"Contract review requested changes: {cr.notes}")
+            return None
+
+        logger.info(f"Contract APPROVED for: {task['title']}")
+        return contract
+
+    def _parse_contract(self) -> dict | None:
+        """Parse the sprint_contract.json written by the builder agent."""
+        contract_path = os.path.join(self.config.data_dir, "sprint_contract.json")
+        if not os.path.isfile(contract_path):
+            return None
+
+        try:
+            with open(contract_path, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+
+            if content.startswith("```"):
+                lines = content.split("\n")
+                lines = [l for l in lines if not l.startswith("```")]
+                content = "\n".join(lines)
+
+            data = json.loads(content)
+            os.remove(contract_path)
+            return data
+        except (json.JSONDecodeError, Exception) as e:
+            logger.warning(f"Failed to parse sprint_contract.json: {e}")
+            return None
 
     def _build_single_builder_fn(self, project_state: dict, loop_count: int):
         """Return a builder function for use with run_parallel_builders.
@@ -464,6 +599,13 @@ class Orchestrator:
             task_result_filename = f"task_result_{task_id}.md"
 
             self.db.mark_task_in_progress(task_id)
+
+            # Sprint contract phase (if enabled)
+            contract = None
+            if self.config.contract.enabled:
+                contract = self._run_contract_phase(task, project_state, loop_count)
+                if contract is None:
+                    logger.warning(f"Contract phase failed for parallel task: {task.get('title', '?')}")
 
             related_kb = find_related_knowledge_files(
                 self.config.knowledge_dir, task.get("area", "general"),
@@ -482,6 +624,19 @@ class Orchestrator:
                 language=self.config.language,
                 templates_dir=self.config.templates_dir,
             )
+
+            # Append contract context to builder prompt
+            if contract:
+                criteria_text = "\n".join(
+                    f"- [{c.get('id', '?')}] {c.get('description', '?')}"
+                    for c in contract.get("verification_criteria", [])
+                )
+                prompt += (
+                    f"\n\n## Approved Sprint Contract\n"
+                    f"**Approach**: {contract.get('approach', '?')}\n"
+                    f"**Files to modify**: {', '.join(contract.get('files_to_modify', []))}\n"
+                    f"**Verification criteria**:\n{criteria_text}\n"
+                )
 
             prompt_path = os.path.join(
                 self.config.prompts_dir, f"builder_{loop_count:04d}_{task_id}.md"
@@ -504,6 +659,21 @@ class Orchestrator:
                     task_result = f.read()
                 os.remove(result_path)
 
+            # Early check: did the agent actually change any files?
+            # If not, skip expensive hooks and fail fast.
+            from .parallel import has_worktree_changes
+            if result.success and not has_worktree_changes(working_dir):
+                agent_tail = (result.output or "")[-500:].strip()
+                logger.warning(
+                    f"Agent completed successfully but produced no file changes. "
+                    f"Task: {task.get('title', '?')[:60]}. "
+                    f"Agent output tail: {agent_tail[:200]}"
+                )
+                return {
+                    "success": False,
+                    "result_summary": f"Agent produced no changes. Output: {agent_tail[:300]}",
+                }
+
             # Quality gate via hooks (run against the worktree, not main workspace)
             qg = self.hook_runner.run_hooks("post_build", working_dir)
 
@@ -514,9 +684,61 @@ class Orchestrator:
                 "result_summary": task_result[:500] if task_result else (
                     f"Quality gate failed: {qg.issues}" if not qg.passed else "Completed"
                 ),
+                "contract": contract,
             }
 
         return _builder
+
+    def _resolve_merge_conflicts(self, workspace_dir: str, conflict_files: list[str]) -> bool:
+        """Use an agent session to intelligently resolve merge conflicts.
+
+        Called when parallel worktree merges hit source code conflicts that
+        cannot be safely auto-resolved by keeping both sides.
+
+        Returns True if all conflicts were resolved successfully.
+        """
+        conflict_list = "\n".join(f"  - {f}" for f in conflict_files)
+        prompt = (
+            "You are resolving git merge conflicts. The following files have conflict markers "
+            "(<<<<<<< / ======= / >>>>>>>):\n\n"
+            f"{conflict_list}\n\n"
+            "For each file:\n"
+            "1. Read the file and understand both sides of the conflict\n"
+            "2. Produce a CORRECT merged version that preserves the intent of both changes\n"
+            "3. Remove ALL conflict markers (<<<<<<< / ======= / >>>>>>>)\n"
+            "4. Ensure no duplicate class members, methods, or fields\n"
+            "5. Ensure the result compiles correctly\n\n"
+            "Rules:\n"
+            "- Do NOT add new features or refactor — only resolve the conflict\n"
+            "- If both sides added the same thing differently, keep the more complete version\n"
+            "- If both sides modified the same code, combine the changes logically\n"
+            "- After editing, run the build command to verify: "
+            f"`{self.config.tasks.build_command}`\n"
+        )
+
+        phase_agent = self._get_phase_agent(self._get_current_phase())
+        result = phase_agent.run_session(
+            prompt=prompt,
+            working_dir=workspace_dir,
+            timeout_minutes=min(5, self.config.agent.timeout_minutes),
+            permission_profile=self._get_permission_profile("builder"),
+        )
+
+        if not result.success:
+            logger.warning(f"Conflict resolution agent failed (exit={result.exit_code})")
+            return False
+
+        # Verify no conflict markers remain
+        for filepath in conflict_files:
+            full_path = os.path.join(workspace_dir, filepath)
+            if os.path.isfile(full_path):
+                with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+                if "<<<<<<<" in content or ">>>>>>>" in content:
+                    logger.warning(f"Conflict markers still present in {filepath}")
+                    return False
+
+        return True
 
     def _run_parallel_builders(
         self, phase: str, project_state: dict, loop_count: int
@@ -591,6 +813,7 @@ class Orchestrator:
             on_complete_fn=on_task_complete,
             workspace_dir=self.config.workspace_dir,
             worktree_base=worktree_base,
+            conflict_resolver=self._resolve_merge_conflicts,
         )
 
         if analyst_thread is not None:

@@ -69,6 +69,11 @@ class ReviewerConfig:
 
 
 @dataclass
+class ContractConfig:
+    enabled: bool = True
+
+
+@dataclass
 class AutoForgeConfig:
     agent: AgentConfig
     phases: list[str]
@@ -87,6 +92,7 @@ class AutoForgeConfig:
     permissions: dict = field(default_factory=dict)  # {"analyst": "readonly", "builder": "full", "reviewer": "readonly"}
     knowledge: dict = field(default_factory=dict)  # {"area_keywords": {"combat": ["fight", "attack"]}, "auto_discover": true}
     phase_config: dict = field(default_factory=dict)  # {"BUILD": {"model": "opus-4"}, "TEST": {"model": "sonnet-4"}}
+    contract: ContractConfig = field(default_factory=ContractConfig)
 
     @classmethod
     def _resolve_path(cls, path: str, base: str) -> str:
@@ -145,6 +151,7 @@ class AutoForgeConfig:
             permissions=raw.get("permissions", {}),
             knowledge=raw.get("knowledge", {}),
             phase_config=raw.get("phase_config", {}),
+            contract=ContractConfig(**{k: v for k, v in raw.get("contract", {}).items() if k in ContractConfig.__dataclass_fields__}),
         )
 
     @property

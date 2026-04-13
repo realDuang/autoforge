@@ -169,6 +169,8 @@ Minimal config (all other fields have sensible defaults):
 | **Per-Phase Overrides** | | |
 | `phase_config.{PHASE}.model` | Model override for a specific phase | (agent default) |
 | `phase_config.{PHASE}.backend` | Backend override for a specific phase | (agent default) |
+| **Contract** | | |
+| `contract.enabled` | Enable sprint contract negotiation before each task | `true` |
 
 ### Hooks
 
@@ -247,6 +249,30 @@ The reviewer runs in a clean context (no builder conversation history), examines
 - **APPROVE** — task passes
 - **REQUEST_CHANGES** — task retried with reviewer feedback
 - **REJECT** — task marked failed
+
+### Sprint Contract
+
+Before each task, the builder proposes a sprint contract — an implementation plan with verification criteria — which is reviewed before coding begins:
+
+```
+1. Analyst generates task with acceptance criteria
+2. Builder proposes sprint contract (approach + verification criteria)
+3. Reviewer approves the contract
+4. Builder implements against the contract
+5. Reviewer evaluates the diff against contract criteria item-by-item
+```
+
+This is enabled by default. To disable:
+
+```json
+{
+  "contract": {
+    "enabled": false
+  }
+}
+```
+
+When the reviewer is also enabled, the final review evaluates each verification criterion from the contract, providing structured pass/fail results instead of subjective assessment.
 
 ## Anti-Convergence
 

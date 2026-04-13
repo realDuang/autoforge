@@ -22,7 +22,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     retry_count INTEGER DEFAULT 0,
     created_at TEXT DEFAULT (datetime('now','localtime')),
     completed_at TEXT,
-    result_summary TEXT
+    result_summary TEXT,
+    acceptance_criteria TEXT
 );
 
 CREATE TABLE IF NOT EXISTS metrics (
@@ -84,6 +85,18 @@ CREATE TABLE IF NOT EXISTS session_metrics (
     phase TEXT,
     perspective TEXT
 );
+
+CREATE TABLE IF NOT EXISTS contracts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL,
+    approach TEXT,
+    files_to_modify TEXT,
+    verification_criteria TEXT,
+    review_verdict TEXT,
+    review_notes TEXT,
+    created_at TEXT DEFAULT (datetime('now','localtime')),
+    FOREIGN KEY (task_id) REFERENCES tasks(id)
+);
 """
 
 
@@ -100,6 +113,11 @@ class Database:
     def _init_schema(self):
         self.conn.executescript(SCHEMA_SQL)
         self.conn.commit()
+        # Migrate existing databases: add new columns if missing
+        try:
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN acceptance_criteria TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
     def close(self):
         self.conn.close()
@@ -135,16 +153,18 @@ class Database:
         phase: str = "BUILD",
         area: str = "general",
         priority: int = 5,
+        acceptance_criteria: list[str] | None = None,
     ) -> Optional[str]:
         """Insert a task. Returns task id or None if fingerprint duplicate."""
         fp = self.make_fingerprint(title, description)
         task_id = f"task-{fp}"
+        criteria_json = json.dumps(acceptance_criteria) if acceptance_criteria else None
         try:
             with self._lock:
                 self.conn.execute(
-                    """INSERT INTO tasks (id, title, description, perspective, phase, area, priority, fingerprint)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (task_id, title, description, perspective, phase, area, priority, fp),
+                    """INSERT INTO tasks (id, title, description, perspective, phase, area, priority, fingerprint, acceptance_criteria)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (task_id, title, description, perspective, phase, area, priority, fp, criteria_json),
                 )
                 self.conn.commit()
             return task_id
@@ -242,6 +262,52 @@ class Database:
             "SELECT retry_count FROM tasks WHERE id = ?", (task_id,)
         ).fetchone()
         return row is not None and row["retry_count"] >= max_retries
+
+    # --- Contracts ---
+
+    def insert_contract(
+        self, task_id: str, approach: str,
+        files_to_modify: list[str],
+        verification_criteria: list[dict],
+    ) -> int:
+        """Insert a sprint contract for a task. Returns the contract row id."""
+        with self._lock:
+            cursor = self.conn.execute(
+                """INSERT INTO contracts (task_id, approach, files_to_modify, verification_criteria)
+                   VALUES (?, ?, ?, ?)""",
+                (task_id, approach,
+                 json.dumps(files_to_modify),
+                 json.dumps(verification_criteria)),
+            )
+            self.conn.commit()
+            return cursor.lastrowid
+
+    def update_contract_review(
+        self, task_id: str, verdict: str, notes: str = "",
+    ):
+        """Update the review verdict on the latest contract for a task."""
+        with self._lock:
+            self.conn.execute(
+                """UPDATE contracts SET review_verdict = ?, review_notes = ?
+                   WHERE task_id = ? AND id = (
+                       SELECT MAX(id) FROM contracts WHERE task_id = ?
+                   )""",
+                (verdict, notes, task_id, task_id),
+            )
+            self.conn.commit()
+
+    def get_contract(self, task_id: str) -> Optional[dict]:
+        """Get the latest contract for a task."""
+        row = self.conn.execute(
+            "SELECT * FROM contracts WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        if not row:
+            return None
+        contract = dict(row)
+        contract["files_to_modify"] = json.loads(contract.get("files_to_modify") or "[]")
+        contract["verification_criteria"] = json.loads(contract.get("verification_criteria") or "[]")
+        return contract
 
     def get_pending_count(self, phase: Optional[str] = None) -> int:
         if phase and phase != "EVOLVE":
