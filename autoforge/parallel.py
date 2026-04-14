@@ -57,8 +57,17 @@ def cleanup_worktrees(workspace_dir: str, worktree_base: str):
         shutil.rmtree(worktree_base, ignore_errors=True)
 
 
-def _create_worktree(workspace_dir: str, worktree_base: str, branch_name: str) -> str:
-    """Create a git worktree. Returns the worktree path."""
+def _create_worktree(
+    workspace_dir: str, worktree_base: str, branch_name: str,
+    symlink_dirs: list[str] | None = None,
+) -> str:
+    """Create a git worktree. Returns the worktree path.
+
+    Args:
+        symlink_dirs: Relative directory paths to symlink from the main workspace
+            into the worktree. Used for large gitignored files (e.g. game assets)
+            that worktrees need at runtime but shouldn't be duplicated.
+    """
     safe_name = branch_name.replace("/", "-")
     worktree_path = os.path.normpath(os.path.join(worktree_base, safe_name))
     os.makedirs(worktree_base, exist_ok=True)
@@ -68,6 +77,18 @@ def _create_worktree(workspace_dir: str, worktree_base: str, branch_name: str) -
     _git(["branch", "-D", branch_name], cwd=workspace_dir, check=False)
     _git(["worktree", "prune"], cwd=workspace_dir, check=False)
     _git(["worktree", "add", worktree_path, "-b", branch_name], cwd=workspace_dir)
+
+    # Create symlinks for large gitignored directories
+    for rel_dir in (symlink_dirs or []):
+        src = os.path.normpath(os.path.join(workspace_dir, rel_dir))
+        dst = os.path.normpath(os.path.join(worktree_path, rel_dir))
+        if os.path.isdir(src) and not os.path.exists(dst):
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            try:
+                os.symlink(src, dst, target_is_directory=True)
+                logger.debug(f"Symlinked {rel_dir} into worktree")
+            except OSError as e:
+                logger.warning(f"Failed to symlink {rel_dir}: {e}")
 
     logger.info(f"Created worktree: {worktree_path} (branch: {branch_name})")
     return worktree_path
@@ -255,6 +276,7 @@ def _run_single_builder(
     workspace_dir: str,
     worktree_base: str,
     conflict_resolver: ConflictResolverFn = None,
+    symlink_dirs: list[str] | None = None,
 ) -> dict:
     """Run a single builder in its own worktree, then merge result.
 
@@ -273,7 +295,7 @@ def _run_single_builder(
     wt_path = None
 
     try:
-        wt_path = _create_worktree(workspace_dir, worktree_base, branch)
+        wt_path = _create_worktree(workspace_dir, worktree_base, branch, symlink_dirs=symlink_dirs)
     except Exception as e:
         logger.error(f"Worktree creation failed for {task_id}: {e}")
         return {"task": task, "success": False, "merged": False, "summary": str(e)}
@@ -340,6 +362,7 @@ def run_worker_pool(
     workspace_dir: str,
     worktree_base: str,
     conflict_resolver: ConflictResolverFn = None,
+    symlink_dirs: list[str] | None = None,
 ) -> int:
     """Run a pool of workers that continuously pull and execute tasks.
 
@@ -382,6 +405,7 @@ def run_worker_pool(
             result = _run_single_builder(
                 task, builder_fn, workspace_dir, worktree_base,
                 conflict_resolver=conflict_resolver,
+                symlink_dirs=symlink_dirs,
             )
             on_complete_fn(result)
 

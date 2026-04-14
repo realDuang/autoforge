@@ -59,6 +59,7 @@ class ParallelConfig:
     worktree_dir: str = ""
     prefetch_analyst: bool = False
     conflict_timeout_minutes: int = 10
+    symlink_dirs: list[str] = field(default_factory=list)  # Relative dirs to symlink from main workspace into worktrees (e.g. large gitignored assets)
 
 
 @dataclass

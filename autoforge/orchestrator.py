@@ -495,9 +495,18 @@ class Orchestrator:
             })
         return self.agent
 
-    def _run_contract_phase(self, task: dict, project_state: dict, loop_count: int) -> dict | None:
-        """Run the contract proposal + review phase. Returns contract dict or None on failure."""
+    def _run_contract_phase(
+        self, task: dict, project_state: dict, loop_count: int,
+        working_dir: str | None = None,
+    ) -> dict | None:
+        """Run the contract proposal + review phase. Returns contract dict or None on failure.
+
+        Args:
+            working_dir: Directory for agent to run in. Defaults to main workspace.
+                         In parallel mode, this should be the worktree path.
+        """
         task_id = task["id"]
+        agent_cwd = working_dir or self.config.workspace_dir
         logger.info(f"=== CONTRACT PHASE: {task['title']} ===")
 
         related_kb = find_related_knowledge_files(
@@ -516,14 +525,15 @@ class Orchestrator:
             templates_dir=self.config.templates_dir,
         )
 
+        # Use task_id in prompt filename to avoid parallel overwrites
         prompt_path = os.path.join(
-            self.config.prompts_dir, f"contract_{loop_count:04d}.md"
+            self.config.prompts_dir, f"contract_{loop_count:04d}_{task_id}.md"
         )
 
         phase_agent = self._get_phase_agent(self._get_current_phase())
         result = phase_agent.run_session(
             prompt=prompt,
-            working_dir=self.config.workspace_dir,
+            working_dir=agent_cwd,
             timeout_minutes=min(10, self.config.agent.timeout_minutes),
             prompt_save_path=prompt_path,
             permission_profile=self._get_permission_profile("builder"),
@@ -533,8 +543,8 @@ class Orchestrator:
             logger.warning("Contract proposal session failed")
             return None
 
-        # Parse sprint_contract.json
-        contract = self._parse_contract()
+        # Parse sprint_contract.json (use task-specific filename to avoid races)
+        contract = self._parse_contract(task_id)
         if not contract:
             logger.warning("Builder did not produce sprint_contract.json")
             return None
@@ -569,10 +579,23 @@ class Orchestrator:
         logger.info(f"Contract APPROVED for: {task['title']}")
         return contract
 
-    def _parse_contract(self) -> dict | None:
-        """Parse the sprint_contract.json written by the builder agent."""
-        contract_path = os.path.join(self.config.data_dir, "sprint_contract.json")
-        if not os.path.isfile(contract_path):
+    def _parse_contract(self, task_id: str = "") -> dict | None:
+        """Parse the sprint_contract.json written by the builder agent.
+
+        Looks for task-specific file first (sprint_contract_{task_id}.json),
+        then falls back to the shared sprint_contract.json for backward compat.
+        """
+        candidates = []
+        if task_id:
+            candidates.append(os.path.join(self.config.data_dir, f"sprint_contract_{task_id}.json"))
+        candidates.append(os.path.join(self.config.data_dir, "sprint_contract.json"))
+
+        contract_path = None
+        for path in candidates:
+            if os.path.isfile(path):
+                contract_path = path
+                break
+        if not contract_path:
             return None
 
         try:
@@ -606,7 +629,9 @@ class Orchestrator:
             # Sprint contract phase (if enabled)
             contract = None
             if self.config.contract.enabled:
-                contract = self._run_contract_phase(task, project_state, loop_count)
+                contract = self._run_contract_phase(
+                    task, project_state, loop_count, working_dir=working_dir
+                )
                 if contract is None:
                     logger.warning(f"Contract phase failed for parallel task: {task.get('title', '?')}")
 
@@ -817,6 +842,7 @@ class Orchestrator:
             workspace_dir=self.config.workspace_dir,
             worktree_base=worktree_base,
             conflict_resolver=self._resolve_merge_conflicts,
+            symlink_dirs=self.config.parallel.symlink_dirs,
         )
 
         if analyst_thread is not None:
