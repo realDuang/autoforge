@@ -42,6 +42,7 @@ class Orchestrator:
             build_command=config.tasks.build_command,
             build_timeout=config.tasks.build_timeout,
             quality_commands=config.tasks.quality_commands,
+            clean_dirs=config.tasks.clean_dirs,
         )
         self._ensure_dirs()
         self._setup_logging()
@@ -273,7 +274,9 @@ class Orchestrator:
         )
 
         if not result.success:
-            logger.error(f"Analyst session failed: {result.stderr[:200]}")
+            logger.error(f"Analyst session failed (exit={result.exit_code}): "
+                         f"stderr={result.stderr[:300] if result.stderr else '(empty)'}, "
+                         f"stdout_tail={result.output[-200:] if result.output else '(empty)'}")
             record_session_metric(
                 self.db, task_id="", session_type="analyst",
                 agent_backend=self.config.agent.backend, model=self.config.agent.model,
@@ -930,10 +933,26 @@ class Orchestrator:
             # 3. Phase dispatch
             if phase == "EVOLVE" or pending == 0:
                 # Run analyst to generate new tasks
+                pre_count = self.db.get_pending_count()
                 self._run_analyst(project_state, loop_count)
+                post_count = self.db.get_pending_count()
                 self._record_metrics(project_state)
                 self._advance_phase()
                 tasks_completed_this_phase = 0
+
+                # If analyst failed to produce any new tasks, apply longer cooldown
+                # to avoid rapid empty-loop spinning
+                if post_count <= pre_count:
+                    analyst_failures = int(self.db.get_state("analyst_consecutive_failures", "0")) + 1
+                    self.db.set_state("analyst_consecutive_failures", str(analyst_failures))
+                    backoff = min(60 * analyst_failures, 300)  # 60s, 120s, 180s, ..., max 300s
+                    logger.warning(
+                        f"Analyst produced no new tasks (consecutive failures: {analyst_failures}). "
+                        f"Backing off {backoff}s before next loop."
+                    )
+                    time.sleep(backoff)
+                else:
+                    self.db.set_state("analyst_consecutive_failures", "0")
 
             else:
                 max_builders = self.config.parallel.max_builders

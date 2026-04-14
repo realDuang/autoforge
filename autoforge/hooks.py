@@ -9,6 +9,8 @@ Stages:
     post_merge  — after successful merge to main
 """
 import logging
+import os
+import shutil
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -37,14 +39,17 @@ class HookResult:
 class HookRunner:
     """Runs lifecycle hooks at specified stages."""
 
-    def __init__(self, hooks_config: dict[str, list[dict]]):
+    def __init__(self, hooks_config: dict[str, list[dict]], clean_dirs: list[str] | None = None):
         """Initialize from hooks configuration.
 
         Args:
             hooks_config: Dict mapping stage names to lists of hook specs.
                 Example: {"post_build": [{"name": "build", "command": "make"}]}
+            clean_dirs: Optional list of relative directory paths to remove
+                before running hooks (e.g. build caches that conflict in worktrees).
         """
         self.hooks: dict[str, list[HookSpec]] = {}
+        self.clean_dirs = clean_dirs or []
         for stage, specs in hooks_config.items():
             self.hooks[stage] = [
                 HookSpec(
@@ -70,6 +75,17 @@ class HookRunner:
         specs = self.hooks.get(stage, [])
         if not specs:
             return HookResult(passed=True)
+
+        # Clean configured cache directories to prevent stale build artifacts
+        # from causing false failures (especially in parallel worktrees).
+        for rel_dir in self.clean_dirs:
+            abs_dir = os.path.join(working_dir, rel_dir)
+            if os.path.isdir(abs_dir):
+                try:
+                    shutil.rmtree(abs_dir)
+                    logger.debug(f"Cleaned cache dir: {abs_dir}")
+                except OSError:
+                    pass  # Best-effort cleanup
 
         issues = []
         warnings = []
@@ -139,6 +155,7 @@ def build_hooks_from_config(
     build_command: str = "",
     build_timeout: int = 120,
     quality_commands: list[dict] | None = None,
+    clean_dirs: list[str] | None = None,
 ) -> HookRunner:
     """Build a HookRunner from config, with backward compatibility.
 
@@ -146,7 +163,7 @@ def build_hooks_from_config(
     Otherwise, auto-generate hooks from legacy build_command and quality_commands.
     """
     if hooks_raw:
-        return HookRunner(hooks_raw)
+        return HookRunner(hooks_raw, clean_dirs=clean_dirs)
 
     # Backward compat: synthesize hooks from legacy config
     post_build_hooks = []
@@ -172,4 +189,4 @@ def build_hooks_from_config(
     if post_build_hooks:
         hooks_config["post_build"] = post_build_hooks
 
-    return HookRunner(hooks_config)
+    return HookRunner(hooks_config, clean_dirs=clean_dirs)
