@@ -24,13 +24,19 @@ if (-not $python) {
 }
 Write-Host "Python: $($python.Source)" -ForegroundColor Green
 
-# Check copilot
-$copilot = Get-Command copilot -ErrorAction SilentlyContinue
-if (-not $copilot) {
-    Write-Host "ERROR: Copilot CLI not found in PATH" -ForegroundColor Red
+# Check agent CLI (read backend from config)
+$agentCmd = "claude"  # default
+if (Test-Path $ConfigFile) {
+    $cfg = Get-Content $ConfigFile -Raw | ConvertFrom-Json -ErrorAction SilentlyContinue
+    if ($cfg.agent.backend -eq "ghcp") { $agentCmd = "copilot" }
+    elseif ($cfg.agent.path) { $agentCmd = $cfg.agent.path }
+}
+$agentBin = Get-Command $agentCmd -ErrorAction SilentlyContinue
+if (-not $agentBin) {
+    Write-Host "ERROR: Agent CLI '$agentCmd' not found in PATH" -ForegroundColor Red
     exit 1
 }
-Write-Host "Copilot: $($copilot.Source)" -ForegroundColor Green
+Write-Host "Agent: $($agentBin.Source) ($agentCmd)" -ForegroundColor Green
 
 # Init mode
 if ($Init) {

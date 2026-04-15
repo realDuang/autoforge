@@ -10,6 +10,8 @@
   "workspace_dir": "./workspace",
   "data_dir": "",
   "seed_file": "./seed.md",
+  "language": "en",
+  "templates_dir": "",
   "phases": ["BUILD", "TEST", "FIX", "EVOLVE"],
   "perspectives": [
     {"id": "P1", "name": "feature_gap",       "label": "Feature Gap",       "desc": "Compare specs vs. implementation, identify unimplemented features, generate new feature tasks"},
@@ -34,12 +36,27 @@
     "cooldown_seconds": 10,
     "build_command": "",
     "build_timeout": 120,
-    "quality_commands": []
+    "quality_commands": [],
+    "clean_dirs": []
   },
+  "hooks": {},
   "parallel": {
     "max_builders": 1,
     "worktree_dir": "",
     "prefetch_analyst": false,
-    "conflict_timeout_minutes": 10
-  }
+    "conflict_timeout_minutes": 10,
+    "symlink_dirs": []
+  },
+  "reviewer": {
+    "enabled": false,
+    "model": "",
+    "backend": "",
+    "max_review_cycles": 2
+  },
+  "contract": {
+    "enabled": false
+  },
+  "permissions": {},
+  "knowledge": {},
+  "phase_config": {}
 }
