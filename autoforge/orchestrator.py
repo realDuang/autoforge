@@ -573,11 +573,90 @@ class Orchestrator:
         self.db.update_contract_review(task_id, cr.verdict, cr.notes)
 
         if cr.verdict == "REQUEST_CHANGES":
-            logger.info(f"Contract review requested changes: {cr.notes}")
-            return None
+            logger.info(f"Contract review requested changes, sending feedback to planner for revision")
+
+            # Revise: feed review feedback back to planner for a revised contract
+            revised = self._revise_contract(
+                task, project_state, loop_count,
+                original_contract=contract,
+                review_feedback=cr.notes,
+                working_dir=working_dir,
+            )
+            if revised:
+                self.db.insert_contract(
+                    task_id=task_id,
+                    approach=revised.get("approach", ""),
+                    files_to_modify=revised.get("files_to_modify", []),
+                    verification_criteria=revised.get("verification_criteria", []),
+                )
+                logger.info(f"Contract REVISED for: {task['title']}")
+                return revised
+            else:
+                logger.warning("Contract revision failed, proceeding without contract")
+                return None
 
         logger.info(f"Contract APPROVED for: {task['title']}")
         return contract
+
+    def _revise_contract(
+        self, task: dict, project_state: dict, loop_count: int,
+        original_contract: dict, review_feedback: str,
+        working_dir: str | None = None,
+    ) -> dict | None:
+        """Revise a contract based on reviewer feedback. Returns revised contract or None."""
+        task_id = task["id"]
+        agent_cwd = working_dir or self.config.workspace_dir
+
+        related_kb = find_related_knowledge_files(
+            self.config.knowledge_dir, task.get("area", "general"),
+            area_keywords=self.config.knowledge.get("area_keywords"),
+        )
+
+        # Build revision prompt with original contract + review feedback
+        base_prompt = generate_contract_prompt(
+            seed_content=self.seed_content,
+            task=task,
+            project_state=project_state,
+            knowledge_dir=self.config.knowledge_dir,
+            related_knowledge_files=related_kb,
+            data_dir=self.config.data_dir,
+            language=self.config.language,
+            templates_dir=self.config.templates_dir,
+        )
+
+        criteria_text = "\n".join(
+            f"- [{c.get('id', '?')}] ({c.get('type', '?')}) {c.get('description', '?')}"
+            for c in original_contract.get("verification_criteria", [])
+        )
+        revision_context = (
+            f"\n\n## Previous Contract (REJECTED by reviewer)\n"
+            f"**Approach**: {original_contract.get('approach', '?')}\n"
+            f"**Files to modify**: {', '.join(original_contract.get('files_to_modify', []))}\n"
+            f"**Verification criteria**:\n{criteria_text}\n\n"
+            f"## Reviewer Feedback\n{review_feedback}\n\n"
+            f"## Your Job\n"
+            f"Revise the contract to address ALL reviewer feedback above. "
+            f"Write the revised contract to the same output path.\n"
+        )
+
+        prompt_path = os.path.join(
+            self.config.prompts_dir, f"contract_revision_{loop_count:04d}_{task_id}.md"
+        )
+
+        phase_agent = self._get_phase_agent(self._get_current_phase())
+        result = phase_agent.run_session(
+            prompt=base_prompt + revision_context,
+            working_dir=agent_cwd,
+            timeout_minutes=min(10, self.config.agent.timeout_minutes),
+            prompt_save_path=prompt_path,
+            permission_profile=self._get_permission_profile("builder"),
+        )
+
+        if not result.success:
+            logger.warning("Contract revision session failed")
+            return None
+
+        return self._parse_contract(task_id)
 
     def _parse_contract(self, task_id: str = "") -> dict | None:
         """Parse the sprint_contract.json written by the builder agent.
