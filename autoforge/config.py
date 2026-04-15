@@ -72,7 +72,7 @@ class ReviewerConfig:
 
 @dataclass
 class ContractConfig:
-    enabled: bool = True
+    enabled: bool = False
 
 
 @dataclass

@@ -76,21 +76,21 @@ class HookRunner:
         if not specs:
             return HookResult(passed=True)
 
-        # Clean configured cache directories to prevent stale build artifacts
-        # from causing false failures (especially in parallel worktrees).
-        for rel_dir in self.clean_dirs:
-            abs_dir = os.path.join(working_dir, rel_dir)
-            if os.path.isdir(abs_dir):
-                try:
-                    shutil.rmtree(abs_dir)
-                    logger.debug(f"Cleaned cache dir: {abs_dir}")
-                except OSError:
-                    pass  # Best-effort cleanup
-
         issues = []
         warnings = []
 
         for hook in specs:
+            # Clean configured cache directories before each hook to prevent
+            # stale build artifacts from earlier hooks causing failures.
+            for rel_dir in self.clean_dirs:
+                abs_dir = os.path.join(working_dir, rel_dir)
+                if os.path.isdir(abs_dir):
+                    try:
+                        shutil.rmtree(abs_dir)
+                        logger.debug(f"Cleaned cache dir: {abs_dir}")
+                    except OSError:
+                        pass  # Best-effort cleanup
+
             logger.info(f"Running hook [{stage}] {hook.name}: {hook.command}")
             exit_code, output = run_cmd_full(hook.command, working_dir, timeout=hook.timeout)
 
