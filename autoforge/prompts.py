@@ -230,6 +230,7 @@ def generate_contract_prompt(
 
     variables = {
         "seed_summary": seed_summary,
+        "task_id": task.get("id", ""),
         "task_title": task.get("title", "?"),
         "task_description": task.get("description", "?"),
         "task_area": task.get("area", "general"),

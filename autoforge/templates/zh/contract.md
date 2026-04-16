@@ -25,7 +25,7 @@
 
 在编写任何代码之前，先提出一份 **Sprint 合同** — 一个具体的实现计划，说明你将如何实现此任务以及如何验证完成情况。
 
-将合同写入 `{data_dir}/sprint_contract.json`，格式：
+将合同写入 `{data_dir}/sprint_contract_{task_id}.json`，格式：
 
 ```json
 {{

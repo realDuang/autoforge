@@ -25,7 +25,7 @@ You are a software developer planning your approach before implementation.
 
 Before writing any code, propose a **sprint contract** — a concrete plan for how you will implement this task and how completion will be verified.
 
-Write your contract to `{data_dir}/sprint_contract.json` in this format:
+Write your contract to `{data_dir}/sprint_contract_{task_id}.json` in this format:
 
 ```json
 {{
