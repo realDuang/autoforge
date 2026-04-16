@@ -546,7 +546,10 @@ class Orchestrator:
         # Parse sprint_contract.json (use task-specific filename to avoid races)
         contract = self._parse_contract(task_id)
         if not contract:
-            logger.warning("Builder did not produce sprint_contract.json")
+            logger.warning(
+                f"Builder did not produce sprint_contract.json. "
+                f"Agent output tail: {(result.output or '')[-200:].strip()}"
+            )
             return None
 
         # Store contract in DB
@@ -656,7 +659,13 @@ class Orchestrator:
             logger.warning("Contract revision session failed")
             return None
 
-        return self._parse_contract(task_id)
+        revised = self._parse_contract(task_id)
+        if not revised:
+            logger.warning(
+                f"Contract revision agent completed but no parseable contract found. "
+                f"Agent output tail: {(result.output or '')[-200:].strip()}"
+            )
+        return revised
 
     def _parse_contract(self, task_id: str = "") -> dict | None:
         """Parse the sprint_contract.json written by the builder agent.
