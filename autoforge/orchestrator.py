@@ -776,7 +776,7 @@ class Orchestrator:
                 os.remove(result_path)
 
             # Early check: did the agent actually change any files?
-            # If not, skip expensive hooks and fail fast.
+            # If not, check whether the agent determined the task is already done.
             from .parallel import has_worktree_changes
             if result.success and not has_worktree_changes(working_dir):
                 agent_tail = (result.output or "")[-500:].strip()
@@ -785,6 +785,27 @@ class Orchestrator:
                     f"Task: {task.get('title', '?')[:60]}. "
                     f"Agent output tail: {agent_tail[:200]}"
                 )
+
+                # If agent concluded the feature already exists, mark as done
+                # instead of failed — prevents wasteful retries.
+                _done_indicators = [
+                    "已实现", "已存在", "已完成", "无需修改", "不需要修改",
+                    "already implemented", "already exists", "already complete",
+                    "no changes needed", "no modification needed", "nothing to change",
+                    "all.*pass", "全部通过", "验证通过", "验收.*通过",
+                ]
+                agent_lower = agent_tail.lower()
+                is_already_done = any(
+                    kw in agent_lower for kw in _done_indicators
+                )
+
+                if is_already_done:
+                    return {
+                        "success": True,
+                        "result_summary": f"Superseded: agent confirmed already implemented. {agent_tail[:200]}",
+                        "superseded": True,
+                    }
+
                 return {
                     "success": False,
                     "result_summary": f"Agent produced no changes. Output: {agent_tail[:300]}",
@@ -904,6 +925,9 @@ class Orchestrator:
             if result.get("success") and result.get("merged"):
                 self.db.mark_task_done(task_id, result_summary=result.get("summary", ""))
                 self.db.touch_area(area)
+            elif result.get("superseded"):
+                # Agent confirmed feature already exists — mark done, no retry
+                self.db.mark_task_done(task_id, result_summary=result.get("summary", "Superseded"))
             else:
                 self.db.mark_task_failed(task_id, reason=result.get("summary", ""))
                 if self.db.should_skip_task(task_id, self.config.tasks.max_retries):

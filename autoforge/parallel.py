@@ -312,6 +312,17 @@ def _run_single_builder(
                 "summary": build_result.get("result_summary", "Builder failed"),
             }
 
+        # Task was confirmed already implemented — no merge needed
+        if build_result.get("superseded"):
+            logger.info(f"[{area}] ○ {title_short} — superseded (already implemented)")
+            return {
+                "task": task,
+                "success": True,
+                "merged": False,
+                "superseded": True,
+                "summary": build_result.get("result_summary", "Already implemented"),
+            }
+
         # Commit and merge
         commit_msg = f"[AutoForge][{task.get('area', '?')}] {task['title']}"
         merge_result = _merge_worktree_to_main(
